@@ -31,6 +31,9 @@ const CommandAnalysisSchema = z.object({
     .array(z.string())
     .optional()
     .describe("List of external packages required, if any"),
+  needsInteractiveMode: z
+    .boolean()
+    .describe("Whether the user's intent is to run an interactive program that needs TTY"),
 });
 
 /**
@@ -47,6 +50,9 @@ const FailureAnalysisSchema = z.object({
     .string()
     .nullable()
     .describe("Alternative command to try - should almost always be provided unless truly impossible"),
+  needsInteractiveMode: z
+    .boolean()
+    .describe("Whether the alternative command needs TTY/interactive mode - only true if the failure was clearly due to missing TTY and the alternative requires it"),
 });
 
 export type CommandAnalysis = z.infer<typeof CommandAnalysisSchema>;
@@ -97,11 +103,13 @@ class CommandExecutor {
   private model: LanguageModel;
   private timeoutMs?: number;
   private verbose: boolean;
+  private forceTTY: boolean;
 
-  constructor(model: LanguageModel, timeoutMs?: number, verbose: boolean = false) {
+  constructor(model: LanguageModel, timeoutMs?: number, verbose: boolean = false, forceTTY: boolean = false) {
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.verbose = verbose;
+    this.forceTTY = forceTTY;
   }
 
   /**
@@ -115,7 +123,7 @@ class CommandExecutor {
       conversationHistory: [],
     };
 
-    while (context.state !== CommandState.SUCCESS && 
+    while (context.state !== CommandState.SUCCESS &&
            context.state !== CommandState.ABORTED) {
       try {
         await this.processState(context);
@@ -138,15 +146,15 @@ class CommandExecutor {
       case CommandState.ANALYZING:
         await this.handleAnalyzing(context);
         break;
-      
+
       case CommandState.CONFIRMING:
         await this.handleConfirming(context);
         break;
-      
+
       case CommandState.EXECUTING:
         await this.handleExecuting(context);
         break;
-      
+
       case CommandState.FAILED:
         await this.handleFailed(context);
         break;
@@ -188,12 +196,12 @@ class CommandExecutor {
       case UserAction.APPROVE:
         context.state = CommandState.EXECUTING;
         break;
-      
+
       case UserAction.REJECT:
         console.log("aborted");
         context.state = CommandState.ABORTED;
         break;
-      
+
       case UserAction.MODIFY:
         if (userAction.input) {
           console.log(chalk.gray(`Refining command based on: "${userAction.input}"`));
@@ -214,7 +222,10 @@ class CommandExecutor {
       return;
     }
 
-    const result = await this.executeCommand(context.currentAnalysis.command);
+    const result = await this.executeCommand(
+      context.currentAnalysis.command,
+      context.currentAnalysis.needsInteractiveMode
+    );
 
     if (result.exitCode === 0) {
       context.state = CommandState.SUCCESS;
@@ -267,16 +278,17 @@ class CommandExecutor {
           ...context.currentAnalysis,
           command: failureAnalysis.alternativeCommand,
           explanation: failureAnalysis.solution,
+          needsInteractiveMode: failureAnalysis.needsInteractiveMode,
         };
-        
+
         context.state = CommandState.CONFIRMING;
       } else {
         // Even without alternative command, allow user to modify
         console.log(chalk.gray("\nNo alternative command suggested. You can modify the request or abort."));
-        
+
         // Prompt for user action
         const userAction = await this.promptUser("Try a different approach?");
-        
+
         if (userAction.type === UserAction.MODIFY && userAction.input) {
           console.log(chalk.gray(`Refining based on: "${userAction.input}"`));
           context.query = userAction.input;
@@ -302,7 +314,7 @@ class CommandExecutor {
     conversationHistory: CoreMessage[]
   ): Promise<CommandAnalysis> {
     const systemPrompt = "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
-    
+
     const userContent = conversationHistory.length > 0
       ? `Based on our conversation, analyze this request and generate an appropriate shell command: "${query}"
 
@@ -312,12 +324,14 @@ Return a JSON object with these exact fields:
   "explanation": "brief explanation of what the command does",
   "isDangerous": false,
   "requiresExternalPackages": false,
-  "externalPackages": []
+  "externalPackages": [],
+  "needsInteractiveMode": false
 }
 
 Set isDangerous to true ONLY for commands that could cause irreversible system damage or data loss (like rm -rf /, format, dd, etc.).
 Common development operations like removing lock files, node_modules, build artifacts, or temporary files are NOT dangerous.
 Set requiresExternalPackages to true and list packages if external tools are needed.
+Set needsInteractiveMode to true if the user's intent is clearly to open/run an interactive program (like "open vim", "start nano", "run python interactively", "launch htop", etc.) or if the program they're trying to run is interactive in your knowledge. If unsure, assume false.
 
 For file searches, prefer searching in user directories (~) rather than system-wide (/) to avoid permission issues and long execution times.
 
@@ -330,11 +344,13 @@ Return a JSON object with these exact fields:
   "explanation": "brief explanation of what the command does",
   "isDangerous": false,
   "requiresExternalPackages": false,
-  "externalPackages": []
+  "externalPackages": [],
+  "needsInteractiveMode": false
 }
 
 Set isDangerous to true ONLY for commands that could cause irreversible system damage or data loss.
 Common development operations are NOT dangerous.
+Set needsInteractiveMode to true if the user's intent is clearly to open/run an interactive program (like "open vim", "start nano", "run python interactively", "launch htop", etc.).
 
 For file searches, prefer searching in user directories (~) rather than system-wide (/).
 
@@ -387,7 +403,8 @@ Return a JSON object with these exact fields:
 {
   "explanation": "brief explanation of why the command failed (1-2 sentences max)",
   "solution": "how to fix the issue or what the user should do (1-2 sentences max)",
-  "alternativeCommand": "alternative command to try (or null ONLY if absolutely no alternative exists)"
+  "alternativeCommand": "alternative command to try (or null ONLY if absolutely no alternative exists)",
+  "needsInteractiveMode": false
 }
 
 IMPORTANT: You should ALMOST ALWAYS provide an alternativeCommand that attempts to fulfill the user's original request. Look at the error message and suggest a command that will work. For example:
@@ -400,6 +417,13 @@ Only return null for alternativeCommand in cases where:
 - The user needs to install software first (but even then, try to suggest the install command)
 - The request is physically impossible (e.g., accessing hardware that doesn't exist)
 - The command requires user-specific information you don't have
+
+IMPORTANT: Set needsInteractiveMode to true ONLY if ALL of these conditions are met:
+1. The failure was clearly caused by missing TTY/terminal (errors like "not a terminal", "no tty", input/output redirection issues)
+2. The alternative command you're suggesting is an interactive program (vim, nano, htop, etc.)
+3. Double-check: Does this alternative command actually need TTY to function properly?
+
+If you're unsure about ANY of these conditions, set needsInteractiveMode to false. Be extremely conservative.
 
 Be very concise and helpful. Keep explanations short. JSON only:`;
 
@@ -441,6 +465,7 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
         explanation: plainText,
         solution: "See explanation above",
         alternativeCommand: null,
+        needsInteractiveMode: false,
       };
     }
 
@@ -451,7 +476,8 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
    * Execute shell command
    */
   private executeCommand(
-    command: string
+    command: string,
+    needsInteractiveMode: boolean = false
   ): Promise<{
     exitCode: number;
     stdout: string;
@@ -459,8 +485,10 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
   }> {
     return new Promise((resolve) => {
       const wrappedCommand = `set -o pipefail; ${command}`;
+      const useInteractive = this.forceTTY || needsInteractiveMode;
+
       const child = spawn("sh", ["-c", wrappedCommand], {
-        stdio: ["inherit", "pipe", "pipe"],
+        stdio: useInteractive ? "inherit" : ["inherit", "pipe", "pipe"],
       });
 
       let stdout = "";
@@ -483,17 +511,19 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
         }, this.timeoutMs);
       }
 
-      child.stdout?.on("data", (data) => {
-        const output = data.toString();
-        process.stdout.write(output);
-        stdout += output;
-      });
+      if (!useInteractive) {
+        child.stdout?.on("data", (data) => {
+          const output = data.toString();
+          process.stdout.write(output);
+          stdout += output;
+        });
 
-      child.stderr?.on("data", (data) => {
-        const output = data.toString();
-        process.stderr.write(output);
-        stderr += output;
-      });
+        child.stderr?.on("data", (data) => {
+          const output = data.toString();
+          process.stderr.write(output);
+          stderr += output;
+        });
+      }
 
       child.on("close", (code) => {
         if (!resolved) {
@@ -501,8 +531,8 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
           if (timeout) clearTimeout(timeout);
           resolve({
             exitCode: code || 0,
-            stdout,
-            stderr,
+            stdout: useInteractive ? "Interactive command completed" : stdout,
+            stderr: useInteractive ? "" : stderr,
           });
         }
       });
@@ -545,20 +575,20 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
     });
 
     const trimmed = response.trim().toLowerCase();
-    
+
     if (trimmed === 'y' || trimmed === 'yes') {
       return { type: UserAction.APPROVE };
     }
-    
+
     if (trimmed === 'n' || trimmed === 'no' || trimmed === '') {
       return { type: UserAction.REJECT };
     }
-    
+
     // Multi-character input is treated as modification
     if (trimmed.length > 1) {
       return { type: UserAction.MODIFY, input: response.trim() };
     }
-    
+
     return { type: UserAction.REJECT };
   }
 
@@ -616,7 +646,7 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
 
     if (this.verbose) {
       console.log(chalk.gray(`\n${analysis.explanation}`));
-      
+
       if (analysis.requiresExternalPackages && analysis.externalPackages?.length) {
         console.log(chalk.yellow(`\nRequires external packages: ${analysis.externalPackages.join(', ')}`));
       }
@@ -650,7 +680,7 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
    * Check if error is permission-related
    */
   private isPermissionError(stderr: string): boolean {
-    return stderr.includes("Permission denied") || 
+    return stderr.includes("Permission denied") ||
            stderr.includes("Operation not permitted");
   }
 }
@@ -663,9 +693,10 @@ export async function handleCommandGeneration(
   query: string,
   timeoutSeconds?: number,
   verbose: boolean = false,
+  forceTTY: boolean = false,
 ): Promise<void> {
   const timeoutMs = timeoutSeconds ? timeoutSeconds * 1000 : undefined;
-  const executor = new CommandExecutor(model, timeoutMs, verbose);
+  const executor = new CommandExecutor(model, timeoutMs, verbose, forceTTY);
   await executor.execute(query);
 }
 

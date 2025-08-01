@@ -88,6 +88,7 @@ aish c "docker ps" --model gpt-4o                  # Use specific model
 
 **Options:**
 - `-t, --timeout <seconds>` - Command timeout (no timeout by default)
+- `--tty` - Force interactive/TTY mode for the command
 - `-v, --verbose` - Show detailed explanations and context
 - `--provider <provider>` - Override default AI provider
 - `--model <model>` - Override provider's preferred model
@@ -97,6 +98,8 @@ aish c "docker ps" --model gpt-4o                  # Use specific model
 2. Shows explanation of what the command does
 3. Asks for confirmation before execution
 4. Executes with real-time output
+
+**Smart TTY Detection:** The AI automatically detects when commands need interactive terminal access (like `vim`, `nano`, `htop`) and enables TTY mode. Use `--tty` to force TTY mode for any command.
 
 ---
 

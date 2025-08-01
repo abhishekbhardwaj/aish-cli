@@ -255,6 +255,7 @@ program
     "-t, --timeout <seconds>",
     "timeout in seconds (no timeout by default)",
   )
+  .option("--tty", "force interactive/TTY mode for the command")
   .option("-v, --verbose", "show detailed explanations and context")
   .option("--provider <provider>", "AI provider to use (overrides default)")
   .option(
@@ -268,6 +269,7 @@ program
       ? parseInt(options.timeout)
       : undefined;
     const verbose = options.verbose || false;
+    const forceTTY = options.tty || false;
 
     try {
       const config = loadConfig();
@@ -276,7 +278,7 @@ program
         options.provider,
         options.model,
       );
-      await handleCommandGeneration(model, query, timeoutSeconds, verbose);
+      await handleCommandGeneration(model, query, timeoutSeconds, verbose, forceTTY);
     } catch (error) {
       console.log(
         chalk.red(
