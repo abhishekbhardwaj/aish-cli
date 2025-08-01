@@ -12,10 +12,16 @@ curl -fsSL https://raw.githubusercontent.com/abhishekbhardwaj/aish-cli/main/scri
 
 This installs AISH to `~/.local/bin/aish` (following XDG Base Directory specification).
 
+**After installation, configure your AI provider:**
+```bash
+aish configure  # Set up your AI provider and API key first
+```
+
 ### Install Specific Version
 
 ```bash
 VERSION=v1.2.3 curl -fsSL https://raw.githubusercontent.com/abhishekbhardwaj/aish-cli/main/scripts/install.sh | bash
+# Then configure: aish configure
 ```
 
 ### Manual Installation
@@ -24,6 +30,7 @@ VERSION=v1.2.3 curl -fsSL https://raw.githubusercontent.com/abhishekbhardwaj/ais
 2. Extract the archive: `tar -xzf aish-*.tar.gz` (or unzip for Windows)
 3. Make executable: `chmod +x aish`
 4. Move to PATH: `mv aish ~/.local/bin/` (or `/usr/local/bin/` with sudo)
+5. **Configure your AI provider:** `aish configure`
 
 ### Build from Source
 
@@ -32,6 +39,7 @@ git clone https://github.com/abhishekbhardwaj/aish-cli.git
 cd aish
 bun install
 bun run build
+# Configure after building: ./aish configure
 ```
 
 ## 📖 Commands Reference

@@ -190,9 +190,12 @@ echo
 print_message info "🎉 ${ORANGE}aish ${GREEN}v${specific_version} installed successfully!"
 print_message info "📍 Installed to: ${YELLOW}$INSTALL_DIR/aish"
 echo
-print_message info "🚀 Try it out:"
-print_message info "  ${YELLOW}aish ask \"What's the weather like?\""
-print_message info "  ${YELLOW}aish configure"
+print_message info "🚀 Get started:"
+print_message info "  ${YELLOW}aish configure    ${GREEN}# Configure AI provider first"
+echo
+print_message info "💡 Then try these commands:"
+print_message info "  ${YELLOW}aish c \"show me disk usage\""
+print_message info "  ${YELLOW}aish ask \"What's the capital of France?\""
 echo
 print_message info "📚 To uninstall:"
 print_message info "  ${YELLOW}rm -f $INSTALL_DIR/aish"
