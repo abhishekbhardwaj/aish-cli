@@ -2,6 +2,10 @@
 
 Your AI-powered command line assistant that supports multiple providers and models.
 
+![AISH Demo](assets/aish.gif)
+
+*Demo showing AISH in action. [Download MP4 version](assets/aish.mp4) for better quality.*
+
 ## 🚀 Installation
 
 ### Quick Install (Recommended)
