@@ -127,6 +127,7 @@ aish configure
 aish configure --provider anthropic --model claude-3-5-sonnet-20241022 --api-key sk-...
 aish configure --provider openai --model gpt-4o --api-key sk-...
 aish configure --provider groq --model llama-3.1-70b-versatile --api-key gsk_...
+aish configure --provider ollama --model llama3.2 --base-url http://localhost:11434/api
 
 # Management commands
 aish configure --list                           # Show all configured providers
@@ -136,9 +137,10 @@ aish configure --remove openai                 # Remove a provider
 ```
 
 **Command-Line Options:**
-- `--provider <provider>` - AI provider (anthropic, openai, xai, openrouter, groq, mistral, google)
+- `--provider <provider>` - AI provider (anthropic, openai, xai, openrouter, groq, mistral, google, ollama)
 - `--model <model>` - Model name
-- `--api-key <key>` - API key
+- `--api-key <key>` - API key for cloud providers
+- `--base-url <url>` - Base URL for local providers (e.g., Ollama)
 - `--update-model <provider:model>` - Update model for existing provider
 - `--set-default <provider>` - Set default provider
 - `--remove <provider>` - Remove provider
@@ -167,6 +169,10 @@ Current Configuration:
 ✓ [DEFAULT] anthropic
     Preferred Model: claude-3-5-sonnet-20241022
     API Key: sk-****-key
+
+  ollama
+    Preferred Model: llama3.2
+    Base URL: http://localhost:11434/api
 
   openai
     Preferred Model: gpt-4o
@@ -287,6 +293,35 @@ Configuration is stored in `~/.config/aish/auth.json` with support for:
 | **Groq** | Llama, Mixtral, Gemma models (Fast & Free) | [Get API Key](https://console.groq.com/keys) |
 | **Mistral** | Mistral 7B, Mixtral 8x7B, etc. | [Get API Key](https://console.mistral.ai/) |
 | **Google** | Gemini Pro, Gemini Flash, etc. | [Get API Key](https://aistudio.google.com/app/apikey) |
+| **Local Ollama** | Llama, Phi, Mistral, CodeLlama, etc. | [Install Ollama](https://ollama.com/download) |
+
+## ⚡ Quick Provider Setup
+
+### Cloud Providers (API Key Required)
+```bash
+# Anthropic Claude
+aish configure --provider anthropic --model claude-3-5-sonnet-20241022 --api-key sk-ant-...
+
+# OpenAI GPT
+aish configure --provider openai --model gpt-4o --api-key sk-proj-...
+
+# Groq (Fast & Free)
+aish configure --provider groq --model llama-3.1-70b-versatile --api-key gsk_...
+```
+
+### Local Providers (Self-Hosted)
+```bash
+# Ollama (requires Ollama to be running locally)
+# First: Install and start Ollama, then pull a model
+ollama pull llama3.2
+ollama serve  # if not running as service
+
+# Configure AISH to use Ollama
+aish configure --provider ollama --model llama3.2 --base-url http://localhost:11434/api
+
+# Custom Ollama URL (remote server)
+aish configure --provider ollama --model phi3 --base-url http://192.168.1.100:11434/api
+```
 
 ## 🛡️ Security Best Practices
 

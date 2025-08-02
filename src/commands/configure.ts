@@ -1,6 +1,6 @@
 /**
  * Configuration Command Handler
- * 
+ *
  * Handles all configuration-related commands including interactive setup,
  * provider management, and CLI-based configuration. Provides both interactive
  * prompts and command-line options for managing AI provider configurations.
@@ -10,16 +10,23 @@ import chalk from "chalk";
 import { select, input, confirm } from "@inquirer/prompts";
 import { ExitPromptError } from "@inquirer/core";
 import { PROVIDERS } from "../config/providers";
-import { 
-  loadConfig, 
-  saveConfig, 
-  addProvider, 
-  removeProvider, 
-  setDefaultProvider, 
-  maskApiKey, 
-  type ProviderConfig, 
-  type Config 
+import {
+  loadConfig,
+  saveConfig,
+  addProvider,
+  removeProvider,
+  setDefaultProvider,
+  maskApiKey,
+  type ProviderConfig,
+  type Config,
 } from "../config/config";
+
+/**
+ * Determines if a provider is a local provider that requires an API URL instead of API key
+ */
+export function isLocalProvider(provider: string): boolean {
+  return provider === "ollama";
+}
 
 /**
  * Command-line options for the configure command
@@ -31,6 +38,8 @@ export interface ConfigureOptions {
   model?: string;
   /** API key for authentication */
   apiKey?: string;
+  /** Base URL for local providers like Ollama */
+  baseUrl?: string;
   /** Update model for existing provider (format: provider:model) */
   updateModel?: string;
   /** Provider name to set as default */
@@ -43,47 +52,54 @@ export interface ConfigureOptions {
 
 /**
  * Main configuration command handler
- * 
+ *
  * Handles both interactive and CLI-based configuration:
  * - Interactive setup for new users
  * - Command-line options for scripting
  * - Provider management (add, remove, update, set default)
  * - Configuration viewing
- * 
+ *
  * @param options - Optional command-line options
  */
-export async function configureCommand(options?: ConfigureOptions): Promise<void> {
+export async function configureCommand(
+  options?: ConfigureOptions,
+): Promise<void> {
   try {
     const config = loadConfig();
-  
+
     // Handle command-line options first
     if (options) {
       if (options.list) {
         showConfiguration(config);
         return;
       }
-      
+
       if (options.remove) {
         await handleRemoveProvider(config, options.remove);
         return;
       }
-      
+
       if (options.setDefault) {
         await handleSetDefaultProvider(config, options.setDefault);
         return;
       }
-      
+
       if (options.updateModel) {
         await handleUpdateModel(config, options.updateModel);
         return;
       }
-      
-      if (options.provider || options.model || options.apiKey) {
+
+      if (
+        options.provider ||
+        options.model ||
+        options.apiKey ||
+        options.baseUrl
+      ) {
         await handleCliConfiguration(config, options);
         return;
       }
     }
-    
+
     // Interactive setup for new users
     if (config.providers.length === 0) {
       console.log("🚀 Welcome to aish - AI Shell Assistant!\n");
@@ -94,11 +110,10 @@ export async function configureCommand(options?: ConfigureOptions): Promise<void
 
     // Interactive menu for existing configurations
     await showInteractiveMenu(config);
-    
   } catch (error: unknown) {
     // Handle Ctrl+C gracefully
     if (error instanceof ExitPromptError) {
-      console.log(chalk.yellow('\n\n👋 Configuration cancelled.'));
+      console.log(chalk.yellow("\n\n👋 Configuration cancelled."));
       process.exit(0);
     }
     // Re-throw other errors
@@ -108,7 +123,7 @@ export async function configureCommand(options?: ConfigureOptions): Promise<void
 
 /**
  * Shows the interactive configuration menu
- * 
+ *
  * @param config - Current configuration
  */
 async function showInteractiveMenu(config: Config): Promise<void> {
@@ -144,12 +159,12 @@ async function showInteractiveMenu(config: Config): Promise<void> {
 
 /**
  * Displays the current configuration in a formatted way
- * 
+ *
  * @param config - Configuration to display
  */
 function showConfiguration(config: Config): void {
   console.log(chalk.bold("\nCurrent Configuration:"));
-  
+
   if (config.providers.length === 0) {
     console.log(chalk.yellow("No providers configured."));
     return;
@@ -158,11 +173,17 @@ function showConfiguration(config: Config): void {
   config.providers.forEach((provider: ProviderConfig, index: number) => {
     const isDefault = provider.provider === config.defaultProvider;
     const prefix = isDefault ? chalk.green("✓ [DEFAULT]") : "  ";
-    
+
     console.log(`${prefix} ${chalk.bold(provider.provider)}`);
     console.log(`    Preferred Model: ${chalk.gray(provider.preferredModel)}`);
-    console.log(`    API Key: ${chalk.gray(maskApiKey(provider.apiKey))}`);
-    
+    if (isLocalProvider(provider.provider)) {
+      console.log(
+        `    Base URL: ${chalk.gray(provider.baseUrl || "Not configured")}`,
+      );
+    } else {
+      console.log(`    API Key: ${chalk.gray(maskApiKey(provider.apiKey))}`);
+    }
+
     if (index < config.providers.length - 1) {
       console.log("");
     }
@@ -171,7 +192,7 @@ function showConfiguration(config: Config): void {
 
 /**
  * Interactive flow for adding a new provider
- * 
+ *
  * @param config - Configuration to modify
  */
 async function addNewProvider(config: Config): Promise<void> {
@@ -184,10 +205,10 @@ async function addNewProvider(config: Config): Promise<void> {
       : `Models: ${provider.models.slice(0, 3).join(", ")}${provider.models.length > 3 ? "..." : ""}`,
   }));
 
-  const selectedProvider = await select({
+  const selectedProvider = (await select({
     message: "Which AI provider would you like to add?",
     choices: providerChoices,
-  }) as keyof typeof PROVIDERS;
+  })) as keyof typeof PROVIDERS;
 
   const provider = PROVIDERS[selectedProvider];
   if (!provider) {
@@ -199,11 +220,15 @@ async function addNewProvider(config: Config): Promise<void> {
   console.log(`\n📚 Available models for ${provider.name}:`);
   if (provider.modelsListUrl) {
     console.log(`   Sample models: ${provider.models.join(", ")}`);
-    console.log(`   ${chalk.bold("Full models list:")} ${chalk.blue(provider.modelsListUrl)}`);
+    console.log(
+      `   ${chalk.bold("Full models list:")} ${chalk.blue(provider.modelsListUrl)}`,
+    );
   } else {
     console.log(`   ${provider.models.join(", ")}`);
   }
-  console.log(`   ${chalk.bold("Documentation:")} ${chalk.blue(provider.docsUrl)}`);
+  console.log(
+    `   ${chalk.bold("Documentation:")} ${chalk.blue(provider.docsUrl)}`,
+  );
 
   // Get model selection
   const selectedModel = await input({
@@ -217,28 +242,59 @@ async function addNewProvider(config: Config): Promise<void> {
     },
   });
 
-  // Get API key
-  console.log(`\n🔑 You'll need an API key for ${provider.name}.`);
-  console.log(`   ${chalk.bold("Get your API key:")} ${chalk.blue(provider.docsUrl)}`);
+  // Get API key or API URL based on provider type
+  let apiKey: string;
+  if (isLocalProvider(selectedProvider)) {
+    console.log(
+      `\n🌐 You'll need to provide the base URL for ${provider.name}.`,
+    );
+    console.log(`   ${chalk.bold("Default URL:")} http://localhost:11434/api`);
+    console.log(
+      `   ${chalk.bold("Documentation:")} ${chalk.blue(provider.docsUrl)}`,
+    );
 
-  const apiKey = await input({
-    message: "Enter your API key:",
-    validate: (input) => {
-      if (!input.trim()) {
-        return "API key is required";
-      }
-      if (input.length < 10) {
-        return "API key seems too short. Please check and try again.";
-      }
-      return true;
-    },
-  });
+    apiKey = await input({
+      message: "Enter your Local base URL:",
+      default: "http://localhost:11434/api",
+      validate: (input) => {
+        if (!input.trim()) {
+          return "Base URL is required";
+        }
+        try {
+          new URL(input);
+          return true;
+        } catch {
+          return "Please enter a valid URL (e.g., http://localhost:11434/api)";
+        }
+      },
+    });
+  } else {
+    console.log(`\n🔑 You'll need an API key for ${provider.name}.`);
+    console.log(
+      `   ${chalk.bold("Get your API key:")} ${chalk.blue(provider.docsUrl)}`,
+    );
+
+    apiKey = await input({
+      message: "Enter your API key:",
+      validate: (input) => {
+        if (!input.trim()) {
+          return "API key is required";
+        }
+        if (input.length < 10) {
+          return "API key seems too short. Please check and try again.";
+        }
+        return true;
+      },
+    });
+  }
 
   // Create and save provider configuration
   const providerConfig: ProviderConfig = {
     provider: selectedProvider,
     preferredModel: selectedModel.trim(),
-    apiKey: apiKey.trim(),
+    ...(isLocalProvider(selectedProvider)
+      ? { baseUrl: apiKey.trim() }
+      : { apiKey: apiKey.trim() }),
   };
 
   addProvider(config, providerConfig);
@@ -248,18 +304,26 @@ async function addNewProvider(config: Config): Promise<void> {
   console.log(chalk.green("\n✅ Provider added successfully!"));
   console.log(`   ${chalk.bold("Provider:")} ${chalk.gray(provider.name)}`);
   console.log(`   ${chalk.bold("Model:")} ${chalk.gray(selectedModel)}`);
-  console.log(`   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`);
-  
+  if (isLocalProvider(selectedProvider)) {
+    console.log(`   ${chalk.bold("Base URL:")} ${chalk.gray(apiKey)}`);
+  } else {
+    console.log(
+      `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`,
+    );
+  }
+
   // Show usage hint for first provider
   if (config.providers.length === 1) {
     console.log(chalk.bold("\n🎉 You're all set! Try asking a question:"));
-    console.log(`   ${chalk.gray(`aish ask "What is the capital of France?"`)}`);
+    console.log(
+      `   ${chalk.gray(`aish ask "What is the capital of France?"`)}`,
+    );
   }
 }
 
 /**
  * Interactive flow for removing a provider
- * 
+ *
  * @param config - Configuration to modify
  */
 async function removeProviderInteractive(config: Config): Promise<void> {
@@ -281,23 +345,30 @@ async function removeProviderInteractive(config: Config): Promise<void> {
   // Confirmation step
   await input({
     message: `Type "${providerToRemove}" to confirm removal:`,
-    validate: (input) => input === providerToRemove ? true : "Please type the exact provider name to confirm",
+    validate: (input) =>
+      input === providerToRemove
+        ? true
+        : "Please type the exact provider name to confirm",
   });
 
   removeProvider(config, providerToRemove);
   saveConfig(config);
 
-  console.log(chalk.green(`✅ Provider "${providerToRemove}" removed successfully!`));
+  console.log(
+    chalk.green(`✅ Provider "${providerToRemove}" removed successfully!`),
+  );
 }
 
 /**
  * Interactive flow for setting default provider
- * 
+ *
  * @param config - Configuration to modify
  */
 async function setDefaultProviderInteractive(config: Config): Promise<void> {
   if (config.providers.length <= 1) {
-    console.log(chalk.yellow("You need at least 2 providers to set a default."));
+    console.log(
+      chalk.yellow("You need at least 2 providers to set a default."),
+    );
     return;
   }
 
@@ -319,7 +390,7 @@ async function setDefaultProviderInteractive(config: Config): Promise<void> {
 
 /**
  * Interactive flow for updating an existing provider
- * 
+ *
  * @param config - Configuration to modify
  */
 async function updateProviderInteractive(config: Config): Promise<void> {
@@ -338,7 +409,9 @@ async function updateProviderInteractive(config: Config): Promise<void> {
     choices,
   });
 
-  const existingProvider = config.providers.find((p: ProviderConfig) => p.provider === providerToUpdate);
+  const existingProvider = config.providers.find(
+    (p: ProviderConfig) => p.provider === providerToUpdate,
+  );
   if (!existingProvider) return;
 
   const providerKey = providerToUpdate as keyof typeof PROVIDERS;
@@ -347,16 +420,20 @@ async function updateProviderInteractive(config: Config): Promise<void> {
     console.error("Invalid provider selected");
     return;
   }
-  
+
   // Show available models
   console.log(`\n📚 Available models for ${provider.name}:`);
   if (provider.modelsListUrl) {
     console.log(`   Sample models: ${provider.models.join(", ")}`);
-    console.log(`   ${chalk.bold("Full models list:")} ${chalk.blue(provider.modelsListUrl)}`);
+    console.log(
+      `   ${chalk.bold("Full models list:")} ${chalk.blue(provider.modelsListUrl)}`,
+    );
   } else {
     console.log(`   ${provider.models.join(", ")}`);
   }
-  console.log(`   ${chalk.bold("Documentation:")} ${chalk.blue(provider.docsUrl)}`);
+  console.log(
+    `   ${chalk.bold("Documentation:")} ${chalk.blue(provider.docsUrl)}`,
+  );
 
   // Update model
   const selectedModel = await input({
@@ -370,33 +447,54 @@ async function updateProviderInteractive(config: Config): Promise<void> {
     },
   });
 
-  // Optionally update API key
+  // Optionally update API key or base URL
+  const isLocal = isLocalProvider(providerToUpdate);
   const updateApiKey = await confirm({
-    message: "Do you want to update the API key?",
+    message: `Do you want to update the ${isLocal ? "base URL" : "API key"}?`,
     default: false,
   });
 
-  let apiKey = existingProvider.apiKey;
+  let apiKey = isLocal ? existingProvider.baseUrl : existingProvider.apiKey;
   if (updateApiKey) {
-    apiKey = await input({
-      message: "Enter your new API key:",
-      validate: (input) => {
-        if (!input.trim()) {
-          return "API key is required";
-        }
-        if (input.length < 10) {
-          return "API key seems too short. Please check and try again.";
-        }
-        return true;
-      },
-    });
+    if (isLocal) {
+      apiKey = await input({
+        message: "Enter your new Local base URL:",
+        default: existingProvider.baseUrl || "http://localhost:11434/api",
+        validate: (input) => {
+          if (!input.trim()) {
+            return "Base URL is required";
+          }
+          try {
+            new URL(input);
+            return true;
+          } catch {
+            return "Please enter a valid URL (e.g., http://localhost:11434/api)";
+          }
+        },
+      });
+    } else {
+      apiKey = await input({
+        message: "Enter your new API key:",
+        validate: (input) => {
+          if (!input.trim()) {
+            return "API key is required";
+          }
+          if (input.length < 10) {
+            return "API key seems too short. Please check and try again.";
+          }
+          return true;
+        },
+      });
+    }
   }
 
   // Save updated configuration
   const updatedProvider: ProviderConfig = {
     provider: providerToUpdate,
     preferredModel: selectedModel.trim(),
-    apiKey: apiKey.trim(),
+    ...(isLocal
+      ? { baseUrl: apiKey?.trim(), apiKey: existingProvider.apiKey }
+      : { apiKey: apiKey?.trim(), baseUrl: existingProvider.baseUrl }),
   };
 
   addProvider(config, updatedProvider);
@@ -406,103 +504,192 @@ async function updateProviderInteractive(config: Config): Promise<void> {
   console.log(`   ${chalk.bold("Provider:")} ${chalk.gray(provider.name)}`);
   console.log(`   ${chalk.bold("Model:")} ${chalk.gray(selectedModel)}`);
   if (updateApiKey) {
-    console.log(`   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`);
+    if (isLocalProvider(providerToUpdate)) {
+      console.log(`   ${chalk.bold("Base URL:")} ${chalk.gray(apiKey)}`);
+    } else {
+      console.log(
+        `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`,
+      );
+    }
   }
 }
 
 /**
  * Handles CLI-based configuration (non-interactive)
- * 
+ *
  * @param config - Configuration to modify
  * @param options - Command-line options
  */
-async function handleCliConfiguration(config: Config, options: ConfigureOptions): Promise<void> {
+async function handleCliConfiguration(
+  config: Config,
+  options: ConfigureOptions,
+): Promise<void> {
   if (!options.provider) {
-    console.log(chalk.red("❌ --provider is required when using CLI configuration"));
+    console.log(
+      chalk.red("❌ --provider is required when using CLI configuration"),
+    );
     return;
   }
-  
+
   const providerKey = options.provider as keyof typeof PROVIDERS;
   if (!PROVIDERS[providerKey]) {
-    console.log(chalk.red(`❌ Invalid provider "${options.provider}". Available providers: ${Object.keys(PROVIDERS).join(", ")}`));
+    console.log(
+      chalk.red(
+        `❌ Invalid provider "${options.provider}". Available providers: ${Object.keys(PROVIDERS).join(", ")}`,
+      ),
+    );
     return;
   }
-  
-  const existingProvider = config.providers.find(p => p.provider === options.provider);
-  
+
+  const existingProvider = config.providers.find(
+    (p) => p.provider === options.provider,
+  );
+
   // Validate required fields for new providers
   if (!options.model && !existingProvider) {
     console.log(chalk.red("❌ --model is required when adding a new provider"));
     return;
   }
-  
-  if (!options.apiKey && !existingProvider) {
-    console.log(chalk.red("❌ --api-key is required when adding a new provider"));
+
+  const isLocal = isLocalProvider(options.provider);
+
+  // Validate required authentication field for new providers
+  if (!existingProvider) {
+    if (isLocal && !options.baseUrl) {
+      console.log(
+        chalk.red("❌ --base-url is required when adding Local provider"),
+      );
+      return;
+    }
+    if (!isLocal && !options.apiKey) {
+      console.log(
+        chalk.red("❌ --api-key is required when adding cloud providers"),
+      );
+      return;
+    }
+  }
+
+  // Validate that the correct option is used for the provider type
+  if (isLocal && options.apiKey && !options.baseUrl) {
+    console.log(
+      chalk.red("❌ Use --base-url instead of --api-key for Local provider"),
+    );
     return;
   }
-  
+  if (!isLocal && options.baseUrl && !options.apiKey) {
+    console.log(
+      chalk.red("❌ Use --api-key instead of --base-url for cloud providers"),
+    );
+    return;
+  }
+
   // Create provider configuration
   const providerConfig: ProviderConfig = {
     provider: options.provider,
     preferredModel: options.model || existingProvider?.preferredModel || "",
-    apiKey: options.apiKey || existingProvider?.apiKey || "",
+    ...(isLocal
+      ? { baseUrl: options.baseUrl || existingProvider?.baseUrl || "" }
+      : { apiKey: options.apiKey || existingProvider?.apiKey || "" }),
   };
-  
+
   // Final validation
   if (!providerConfig.preferredModel) {
     console.log(chalk.red("❌ Model is required"));
     return;
   }
-  
-  if (!providerConfig.apiKey) {
-    console.log(chalk.red("❌ API key is required"));
-    return;
+
+  // Validate required authentication field
+  if (isLocal) {
+    if (!providerConfig.baseUrl) {
+      console.log(chalk.red("❌ Base URL is required"));
+      return;
+    }
+    // Validate base URL format
+    try {
+      new URL(providerConfig.baseUrl);
+    } catch {
+      console.log(
+        chalk.red(
+          "❌ Invalid base URL format. Please provide a valid URL (e.g., http://localhost:11434/api)",
+        ),
+      );
+      return;
+    }
+  } else {
+    if (!providerConfig.apiKey) {
+      console.log(chalk.red("❌ API key is required"));
+      return;
+    }
   }
-  
+
   // Save configuration
   addProvider(config, providerConfig);
   saveConfig(config);
-  
+
   const provider = PROVIDERS[providerKey];
   const action = existingProvider ? "updated" : "added";
-  
+
   console.log(chalk.green(`\n✅ Provider ${action} successfully!`));
   console.log(`   ${chalk.bold("Provider:")} ${chalk.gray(provider.name)}`);
-  console.log(`   ${chalk.bold("Preferred Model:")} ${chalk.gray(providerConfig.preferredModel)}`);
-  console.log(`   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(providerConfig.apiKey))}`);
+  console.log(
+    `   ${chalk.bold("Preferred Model:")} ${chalk.gray(providerConfig.preferredModel)}`,
+  );
+  if (isLocal) {
+    console.log(
+      `   ${chalk.bold("Base URL:")} ${chalk.gray(providerConfig.baseUrl)}`,
+    );
+  } else {
+    console.log(
+      `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(providerConfig.apiKey))}`,
+    );
+  }
 }
 
 /**
  * Handles provider removal via CLI
- * 
+ *
  * @param config - Configuration to modify
  * @param providerToRemove - Name of provider to remove
  */
-async function handleRemoveProvider(config: Config, providerToRemove: string): Promise<void> {
-  const existingProvider = config.providers.find(p => p.provider === providerToRemove);
+async function handleRemoveProvider(
+  config: Config,
+  providerToRemove: string,
+): Promise<void> {
+  const existingProvider = config.providers.find(
+    (p) => p.provider === providerToRemove,
+  );
   if (!existingProvider) {
     console.log(chalk.red(`❌ Provider "${providerToRemove}" not found.`));
     return;
   }
-  
+
   removeProvider(config, providerToRemove);
   saveConfig(config);
-  console.log(chalk.green(`✅ Provider "${providerToRemove}" removed successfully!`));
+  console.log(
+    chalk.green(`✅ Provider "${providerToRemove}" removed successfully!`),
+  );
 }
 
 /**
  * Handles setting default provider via CLI
- * 
+ *
  * @param config - Configuration to modify
  * @param providerName - Name of provider to set as default
  */
-async function handleSetDefaultProvider(config: Config, providerName: string): Promise<void> {
-  const existingProvider = config.providers.find(p => p.provider === providerName);
+async function handleSetDefaultProvider(
+  config: Config,
+  providerName: string,
+): Promise<void> {
+  const existingProvider = config.providers.find(
+    (p) => p.provider === providerName,
+  );
   if (!existingProvider) {
-    console.log(chalk.red(`❌ Provider "${providerName}" not found. Add it first.`));
+    console.log(
+      chalk.red(`❌ Provider "${providerName}" not found. Add it first.`),
+    );
     return;
   }
-  
+
   setDefaultProvider(config, providerName);
   saveConfig(config);
   console.log(chalk.green(`✅ Default provider set to "${providerName}"!`));
@@ -510,44 +697,54 @@ async function handleSetDefaultProvider(config: Config, providerName: string): P
 
 /**
  * Handles updating model for existing provider via CLI
- * 
+ *
  * @param config - Configuration to modify
  * @param updateModelArg - Provider:model string (e.g., "openai:gpt-4o")
  */
-async function handleUpdateModel(config: Config, updateModelArg: string): Promise<void> {
+async function handleUpdateModel(
+  config: Config,
+  updateModelArg: string,
+): Promise<void> {
   const parts = updateModelArg.split(":");
   if (parts.length !== 2 || !parts[0] || !parts[1]) {
-    console.log(chalk.red("❌ Invalid format. Use: provider:model (e.g., openai:gpt-4o)"));
+    console.log(
+      chalk.red("❌ Invalid format. Use: provider:model (e.g., openai:gpt-4o)"),
+    );
     return;
   }
-  
+
   const [providerName, newModel] = parts;
-  
-  const existingProvider = config.providers.find(p => p.provider === providerName);
+
+  const existingProvider = config.providers.find(
+    (p) => p.provider === providerName,
+  );
   if (!existingProvider) {
-    console.log(chalk.red(`❌ Provider "${providerName}" not found. Add it first.`));
+    console.log(
+      chalk.red(`❌ Provider "${providerName}" not found. Add it first.`),
+    );
     return;
   }
-  
+
   const providerKey = providerName as keyof typeof PROVIDERS;
   if (!PROVIDERS[providerKey]) {
     console.log(chalk.red(`❌ Invalid provider "${providerName}".`));
     return;
   }
-  
+
   // Update the model while keeping existing API key
   const updatedProvider: ProviderConfig = {
     provider: providerName,
     preferredModel: newModel.trim(),
     apiKey: existingProvider.apiKey,
   };
-  
+
   addProvider(config, updatedProvider);
   saveConfig(config);
-  
+
   const provider = PROVIDERS[providerKey];
   console.log(chalk.green(`\n✅ Model updated successfully!`));
   console.log(`   ${chalk.bold("Provider:")} ${chalk.gray(provider.name)}`);
-  console.log(`   ${chalk.bold("Preferred Model:")} ${chalk.gray(existingProvider.preferredModel)} → ${chalk.gray(newModel)}`);
+  console.log(
+    `   ${chalk.bold("Preferred Model:")} ${chalk.gray(existingProvider.preferredModel)} → ${chalk.gray(newModel)}`,
+  );
 }
-

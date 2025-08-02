@@ -18,8 +18,10 @@ export interface ProviderConfig {
   provider: string;
   /** Preferred model name to use with this provider */
   preferredModel: string;
-  /** API key for authentication */
-  apiKey: string;
+  /** API key for authentication (cloud providers) */
+  apiKey?: string;
+  /** Base URL for local providers (e.g., Ollama) */
+  baseUrl?: string;
 }
 
 /**
@@ -72,14 +74,30 @@ export function loadConfig(): Config {
     
     // Handle legacy config format (single provider at root level)
     if (parsed.provider && parsed.model && parsed.apiKey) {
+      const isLocal = parsed.provider === "ollama";
       return {
         providers: [{
           provider: parsed.provider,
           preferredModel: parsed.model,
-          apiKey: parsed.apiKey
+          ...(isLocal ? { baseUrl: parsed.apiKey } : { apiKey: parsed.apiKey })
         }],
         defaultProvider: parsed.provider
       };
+    }
+    
+    // Migrate existing configs where Ollama baseUrl was stored in apiKey field
+    if (parsed.providers) {
+      parsed.providers = parsed.providers.map((provider: any) => {
+        if (provider.provider === "ollama" && provider.apiKey && !provider.baseUrl) {
+          // Migrate Ollama configs: move apiKey to baseUrl
+          return {
+            ...provider,
+            baseUrl: provider.apiKey,
+            apiKey: undefined
+          };
+        }
+        return provider;
+      });
     }
     
     // Return parsed config or empty config if malformed
@@ -114,7 +132,7 @@ export function saveConfig(config: Config): void {
  * @param apiKey - The API key to mask
  * @returns Masked API key string (e.g., "sk-1***abc2")
  */
-export function maskApiKey(apiKey: string): string {
+export function maskApiKey(apiKey?: string): string {
   if (!apiKey || apiKey.length < 8) {
     return "****";
   }

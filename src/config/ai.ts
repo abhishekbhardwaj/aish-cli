@@ -13,6 +13,8 @@ import { createMistral } from "@ai-sdk/mistral";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createOllama } from "ollama-ai-provider";
+
 import {
   generateText,
   generateObject,
@@ -23,6 +25,7 @@ import {
 import { z } from "zod";
 import { LLMJSONParser } from "ai-json-fixer";
 import type { ProviderConfig } from "./config";
+import { isLocalProvider } from "../commands/configure";
 
 /**
  * Factory function for creating Anthropic provider
@@ -81,6 +84,14 @@ export const createAiSdkOpenRouter = (apiKey: string) =>
   });
 
 /**
+ * Factory function for creating Ollama provider
+ */
+export const createAiSdkOllama = (baseURL: string) =>
+  createOllama({
+    baseURL,
+  });
+
+/**
  * Supported AI providers
  */
 export type SupportedProvider =
@@ -90,7 +101,8 @@ export type SupportedProvider =
   | "mistral"
   | "google"
   | "groq"
-  | "openrouter";
+  | "openrouter"
+  | "ollama";
 
 /**
  * Provider factory map for type safety
@@ -103,6 +115,7 @@ const PROVIDER_FACTORIES = {
   google: createAiSdkGoogle,
   groq: createAiSdkGroq,
   openrouter: createAiSdkOpenRouter,
+  ollama: createAiSdkOllama,
 } as const;
 
 /**
@@ -223,23 +236,30 @@ export function createModel(config: ProviderConfig): LanguageModel {
   }
 
   try {
-    switch (provider) {
-      case "anthropic":
-        return createAiSdkAnthropic(config.apiKey)(config.preferredModel);
-      case "openai":
-        return createAiSdkOpenAI(config.apiKey)(config.preferredModel);
-      case "xai":
-        return createAiSdkXai(config.apiKey)(config.preferredModel);
-      case "mistral":
-        return createAiSdkMistral(config.apiKey)(config.preferredModel);
-      case "google":
-        return createAiSdkGoogle(config.apiKey)(config.preferredModel);
-      case "groq":
-        return createAiSdkGroq(config.apiKey)(config.preferredModel);
-      case "openrouter":
-        return createAiSdkOpenRouter(config.apiKey)(config.preferredModel);
-      default:
-        throw new UnsupportedProviderError(provider);
+    if (isLocalProvider(provider)) {
+      if (!config.baseUrl) throw new Error(`Base URL is required for ${provider}`);
+      return createAiSdkOllama(config.baseUrl)(config.preferredModel);
+    } else {
+      if (!config.apiKey) throw new Error(`API key is required for ${provider}`);
+      
+      switch (provider) {
+        case "anthropic":
+          return createAiSdkAnthropic(config.apiKey)(config.preferredModel);
+        case "openai":
+          return createAiSdkOpenAI(config.apiKey)(config.preferredModel);
+        case "xai":
+          return createAiSdkXai(config.apiKey)(config.preferredModel);
+        case "mistral":
+          return createAiSdkMistral(config.apiKey)(config.preferredModel);
+        case "google":
+          return createAiSdkGoogle(config.apiKey)(config.preferredModel);
+        case "groq":
+          return createAiSdkGroq(config.apiKey)(config.preferredModel);
+        case "openrouter":
+          return createAiSdkOpenRouter(config.apiKey)(config.preferredModel);
+        default:
+          throw new UnsupportedProviderError(provider);
+      }
     }
   } catch (error) {
     throw new ModelCreationError(provider, error);

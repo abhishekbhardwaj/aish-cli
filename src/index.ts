@@ -17,7 +17,7 @@ import {
   getDefaultProvider,
   type ProviderConfig,
 } from "./config/config";
-import { configureCommand } from "./commands/configure";
+import { configureCommand, isLocalProvider } from "./commands/configure";
 import { createModel, generateAIText, streamAIText } from "./config/ai";
 import { handleCommandGeneration } from "./commands/command";
 
@@ -185,10 +185,11 @@ program
   .description("Configure AI provider, model, and API key")
   .option(
     "--provider <provider>",
-    "AI provider (anthropic, openai, xai, openrouter, groq, mistral, google)",
+    "AI provider (anthropic, openai, xai, openrouter, groq, mistral, google, ollama)",
   )
   .option("--model <model>", "Model name")
   .option("--api-key <key>", "API key")
+  .option("--base-url <url>", "Base URL for local providers (e.g., Ollama)")
   .option(
     "--update-model <provider:model>",
     "Update model for existing provider (format: provider:model)",
@@ -227,12 +228,17 @@ program
     config.providers.forEach((provider, index) => {
       const isDefault = provider.provider === config.defaultProvider;
       const prefix = isDefault ? chalk.green("✓ [DEFAULT]") : "  ";
+      const isLocal = isLocalProvider(provider.provider);
 
       console.log(`${prefix} ${chalk.bold(provider.provider)}`);
       console.log(
         `    Preferred Model: ${chalk.gray(provider.preferredModel)}`,
       );
-      console.log(`    API Key: ${chalk.gray(maskApiKey(provider.apiKey))}`);
+      if (isLocal) {
+        console.log(`    Base URL: ${chalk.gray(provider.baseUrl || "Not configured")}`);
+      } else {
+        console.log(`    API Key: ${chalk.gray(maskApiKey(provider.apiKey))}`);
+      }
 
       // Add spacing between providers (except for the last one)
       if (index < config.providers.length - 1) {
