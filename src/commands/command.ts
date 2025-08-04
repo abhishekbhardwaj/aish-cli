@@ -6,7 +6,7 @@
  */
 
 import chalk from "chalk";
-import { input } from "@inquirer/prompts";
+import { input, password } from "@inquirer/prompts";
 import { spawn } from "child_process";
 import { z } from "zod";
 import type { LanguageModel, CoreMessage } from "ai";
@@ -33,7 +33,9 @@ const CommandAnalysisSchema = z.object({
     .describe("List of external packages required, if any"),
   needsInteractiveMode: z
     .boolean()
-    .describe("Whether the user's intent is to run an interactive program that needs TTY"),
+    .describe(
+      "Whether the user's intent is to run an interactive program that needs TTY",
+    ),
 });
 
 /**
@@ -49,10 +51,14 @@ const FailureAnalysisSchema = z.object({
   alternativeCommand: z
     .string()
     .nullable()
-    .describe("Alternative command to try - should almost always be provided unless truly impossible"),
+    .describe(
+      "Alternative command to try - should almost always be provided unless truly impossible",
+    ),
   needsInteractiveMode: z
     .boolean()
-    .describe("Whether the alternative command needs TTY/interactive mode - only true if the failure was clearly due to missing TTY and the alternative requires it"),
+    .describe(
+      "Whether the alternative command needs TTY/interactive mode - only true if the failure was clearly due to missing TTY and the alternative requires it",
+    ),
 });
 
 export type CommandAnalysis = z.infer<typeof CommandAnalysisSchema>;
@@ -94,6 +100,8 @@ interface CommandContext {
     stdout: string;
     stderr: string;
   };
+  isSudoRetry?: boolean;
+  sudoAttempts?: number;
 }
 
 /**
@@ -105,7 +113,12 @@ class CommandExecutor {
   private verbose: boolean;
   private forceTTY: boolean;
 
-  constructor(model: LanguageModel, timeoutMs?: number, verbose: boolean = false, forceTTY: boolean = false) {
+  constructor(
+    model: LanguageModel,
+    timeoutMs?: number,
+    verbose: boolean = false,
+    forceTTY: boolean = false,
+  ) {
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.verbose = verbose;
@@ -123,8 +136,10 @@ class CommandExecutor {
       conversationHistory: [],
     };
 
-    while (context.state !== CommandState.SUCCESS &&
-           context.state !== CommandState.ABORTED) {
+    while (
+      context.state !== CommandState.SUCCESS &&
+      context.state !== CommandState.ABORTED
+    ) {
       try {
         await this.processState(context);
       } catch (error) {
@@ -167,7 +182,7 @@ class CommandExecutor {
   private async handleAnalyzing(context: CommandContext): Promise<void> {
     const analysis = await this.analyzeCommand(
       context.query,
-      context.conversationHistory
+      context.conversationHistory,
     );
 
     context.currentAnalysis = analysis;
@@ -204,7 +219,9 @@ class CommandExecutor {
 
       case UserAction.MODIFY:
         if (userAction.input) {
-          console.log(chalk.gray(`Refining command based on: "${userAction.input}"`));
+          console.log(
+            chalk.gray(`Refining command based on: "${userAction.input}"`),
+          );
           this.updateConversationHistory(context, userAction.input);
           context.query = userAction.input;
           context.state = CommandState.ANALYZING;
@@ -224,10 +241,16 @@ class CommandExecutor {
 
     const result = await this.executeCommand(
       context.currentAnalysis.command,
-      context.currentAnalysis.needsInteractiveMode
+      context.currentAnalysis.needsInteractiveMode,
+      context.isSudoRetry,
     );
 
+    // Reset sudo retry flag after use
+    context.isSudoRetry = false;
+
     if (result.exitCode === 0) {
+      // Reset sudo attempts on success
+      context.sudoAttempts = 0;
       context.state = CommandState.SUCCESS;
     } else {
       context.lastError = {
@@ -254,17 +277,44 @@ class CommandExecutor {
       return;
     }
 
-    // Handle permission errors
+    // Handle sudo authentication failures specifically
+    if (
+      context.lastError.stderr.includes("Sorry, try again") ||
+      context.lastError.stderr.includes("incorrect password") ||
+      context.lastError.stderr.includes("authentication failure")
+    ) {
+      console.log(
+        chalk.red("\nAuthentication failed. Incorrect sudo password."),
+      );
+
+      // Track sudo attempts
+      context.sudoAttempts = (context.sudoAttempts || 0) + 1;
+
+      // Allow retry with same command (up to 3 attempts total)
+      if (context.currentAnalysis && context.sudoAttempts < 3) {
+        console.log(chalk.gray("Try again with the correct password."));
+        context.isSudoRetry = true;
+        context.state = CommandState.EXECUTING; // Skip confirmation, go directly to execution
+        return;
+      } else if (context.sudoAttempts >= 3) {
+        console.log(chalk.red("sudo: 3 incorrect password attempts"));
+        context.state = CommandState.ABORTED;
+        return;
+      }
+    }
+
+    // Handle other permission errors
     if (this.isPermissionError(context.lastError.stderr)) {
-      console.log(chalk.red("Exiting due to permission errors."));
-      process.exit(1);
+      console.log(chalk.red("\nPermission denied."));
+      context.state = CommandState.ABORTED;
+      return;
     }
 
     try {
       const failureAnalysis = await this.analyzeFailure(
         context.lastError,
         context.query,
-        context.conversationHistory
+        context.conversationHistory,
       );
 
       this.displayFailureAnalysis(failureAnalysis);
@@ -284,7 +334,11 @@ class CommandExecutor {
         context.state = CommandState.CONFIRMING;
       } else {
         // Even without alternative command, allow user to modify
-        console.log(chalk.gray("\nNo alternative command suggested. You can modify the request or abort."));
+        console.log(
+          chalk.gray(
+            "\nNo alternative command suggested. You can modify the request or abort.",
+          ),
+        );
 
         // Prompt for user action
         const userAction = await this.promptUser("Try a different approach?");
@@ -311,12 +365,14 @@ class CommandExecutor {
    */
   private async analyzeCommand(
     query: string,
-    conversationHistory: CoreMessage[]
+    conversationHistory: CoreMessage[],
   ): Promise<CommandAnalysis> {
-    const systemPrompt = "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
+    const systemPrompt =
+      "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
 
-    const userContent = conversationHistory.length > 0
-      ? `Based on our conversation, analyze this request and generate an appropriate shell command: "${query}"
+    const userContent =
+      conversationHistory.length > 0
+        ? `Based on our conversation, analyze this request and generate an appropriate shell command: "${query}"
 
 Return a JSON object with these exact fields:
 {
@@ -336,7 +392,7 @@ Set needsInteractiveMode to true if the user's intent is clearly to open/run an 
 For file searches, prefer searching in user directories (~) rather than system-wide (/) to avoid permission issues and long execution times.
 
 JSON only:`
-      : `Analyze this user query and generate an appropriate shell command: "${query}"
+        : `Analyze this user query and generate an appropriate shell command: "${query}"
 
 Return a JSON object with these exact fields:
 {
@@ -358,7 +414,7 @@ JSON only:`;
 
     const messages: CoreMessage[] = [
       ...conversationHistory,
-      { role: "user", content: userContent }
+      { role: "user", content: userContent },
     ];
 
     const result = await loading.withLoading(
@@ -381,13 +437,14 @@ JSON only:`;
    * Analyze command failure
    */
   private async analyzeFailure(
-    error: CommandContext['lastError'],
+    error: CommandContext["lastError"],
     query: string,
-    conversationHistory: CoreMessage[]
+    conversationHistory: CoreMessage[],
   ): Promise<FailureAnalysis> {
     if (!error) throw new Error("No error to analyze");
 
-    const systemPrompt = "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
+    const systemPrompt =
+      "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
 
     const userPrompt = `A command failed with the following details:
 
@@ -429,7 +486,7 @@ Be very concise and helpful. Keep explanations short. JSON only:`;
 
     const messages: CoreMessage[] = [
       ...conversationHistory,
-      { role: "user", content: userPrompt }
+      { role: "user", content: userPrompt },
     ];
 
     const result = await loading.withLoading(
@@ -453,11 +510,12 @@ Error: ${error.stderr}
 Original user query: "${query}"
 
 Briefly explain why it failed and how to fix it (1-2 sentences max).`,
-        }
+        },
       ];
 
       const plainText = await generateAIText(this.model, {
-        system: "You are a shell command expert. Analyze command failures and provide helpful explanations and solutions.",
+        system:
+          "You are a shell command expert. Analyze command failures and provide helpful explanations and solutions.",
         messages: fallbackMessages,
       });
 
@@ -473,27 +531,116 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
   }
 
   /**
-   * Execute shell command
+   * Authenticate sudo using sudo -v
    */
-  private executeCommand(
-    command: string,
-    needsInteractiveMode: boolean = false
-  ): Promise<{
+  private authenticateSudo(sudoPassword: string): Promise<{
     exitCode: number;
     stdout: string;
     stderr: string;
   }> {
     return new Promise((resolve) => {
+      const child = spawn("sudo", ["-S", "-v"], {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      let stderr = "";
+      let resolved = false;
+
+      child.stderr?.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      // Send password
+      if (child.stdin) {
+        child.stdin.write(sudoPassword + "\n");
+        child.stdin.end();
+      }
+
+      child.on("close", (code) => {
+        if (!resolved) {
+          resolved = true;
+          resolve({
+            exitCode: code || 0,
+            stdout: "",
+            stderr: stderr,
+          });
+        }
+      });
+
+      child.on("error", (error) => {
+        if (!resolved) {
+          resolved = true;
+          resolve({
+            exitCode: 1,
+            stdout: "",
+            stderr: error.message,
+          });
+        }
+      });
+    });
+  }
+
+  /**
+   * Execute shell command
+   */
+  private async executeCommand(
+    command: string,
+    needsInteractiveMode: boolean = false,
+    isSudoRetry: boolean = false,
+  ): Promise<{
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+  }> {
+    // Check if command contains sudo
+    const hasSudo = /\bsudo\b/.test(command);
+    let sudoPassword: string | undefined;
+
+    if (hasSudo && !needsInteractiveMode) {
+      // Prompt for password before executing
+      const promptMessage = isSudoRetry
+        ? "Enter sudo password (retry):"
+        : "Enter sudo password:";
+
+      sudoPassword = await password({
+        message: promptMessage,
+        mask: "*",
+      });
+
+      // For piped commands, authenticate sudo first using sudo -v
+      if (command.includes("|")) {
+        // Run sudo -v to cache credentials
+        const authResult = await this.authenticateSudo(sudoPassword);
+        if (authResult.exitCode !== 0) {
+          return authResult;
+        }
+        // Don't modify the command - sudo will use cached credentials
+      } else {
+        // For non-piped commands, use sudo -S
+        command = command.replace(/\bsudo\b/g, "sudo -S");
+      }
+    }
+
+    return new Promise((resolve) => {
       const wrappedCommand = `set -o pipefail; ${command}`;
       const useInteractive = this.forceTTY || needsInteractiveMode;
 
+      // Only use piped stdin if we need to send a password
+      const needsPipedStdin = sudoPassword && !command.includes("|");
+
       const child = spawn("sh", ["-c", wrappedCommand], {
-        stdio: useInteractive ? "inherit" : ["inherit", "pipe", "pipe"],
+        stdio: useInteractive
+          ? "inherit"
+          : needsPipedStdin
+            ? ["pipe", "pipe", "pipe"]
+            : ["inherit", "pipe", "pipe"],
       });
 
       let stdout = "";
       let stderr = "";
       let resolved = false;
+      let passwordSent = false;
+      let firstOutputReceived = false;
 
       // Set up timeout
       let timeout: NodeJS.Timeout | undefined;
@@ -505,7 +652,9 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
             resolve({
               exitCode: 124, // Standard timeout exit code
               stdout,
-              stderr: stderr + `\nCommand timed out after ${this.timeoutMs! / 1000} seconds`,
+              stderr:
+                stderr +
+                `\nCommand timed out after ${this.timeoutMs! / 1000} seconds`,
             });
           }
         }, this.timeoutMs);
@@ -514,13 +663,60 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
       if (!useInteractive) {
         child.stdout?.on("data", (data) => {
           const output = data.toString();
-          process.stdout.write(output);
+
+          // For sudo commands, add newline before first real output
+          if (sudoPassword && !firstOutputReceived && output.trim()) {
+            firstOutputReceived = true;
+            process.stdout.write("\n");
+          }
+
+          // Filter out password prompts from sudo
+          const passwordPromptRegex =
+            /^(Password|Mot de passe|Contraseña|Passwort|パスワード|密码|Пароль):\s*$/m;
+          const filteredOutput = output.replace(passwordPromptRegex, "");
+          if (filteredOutput.trim()) {
+            process.stdout.write(filteredOutput);
+          }
           stdout += output;
         });
 
         child.stderr?.on("data", (data) => {
           const output = data.toString();
-          process.stderr.write(output);
+
+          // Check if this is a sudo password prompt
+          const isSudoPrompt =
+            output.includes("[sudo]") ||
+            output.match(
+              /^(Password|Mot de passe|Contraseña|Passwort|パスワード|密码|Пароль):\s*$/m,
+            );
+
+          // Filter out password-related prompts
+          if (!isSudoPrompt) {
+            // For sudo commands, add newline before first real error output
+            if (sudoPassword && !firstOutputReceived && output.trim()) {
+              firstOutputReceived = true;
+              process.stdout.write("\n");
+            }
+            process.stderr.write(output);
+          }
+
+          // If we see a password prompt and haven't sent password yet, send it
+          if (
+            sudoPassword &&
+            !passwordSent &&
+            isSudoPrompt &&
+            !command.includes("|")
+          ) {
+            passwordSent = true;
+            if (child.stdin) {
+              // Small delay to ensure sudo is ready
+              setTimeout(() => {
+                child.stdin!.write(sudoPassword + "\n");
+                child.stdin!.end();
+              }, 50);
+            }
+          }
+
           stderr += output;
         });
       }
@@ -569,18 +765,20 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
   /**
    * Prompt user for action
    */
-  private async promptUser(command: string): Promise<{ type: UserAction; input?: string }> {
+  private async promptUser(
+    command: string,
+  ): Promise<{ type: UserAction; input?: string }> {
     const response = await input({
       message: `${command} [y/N/modify]`,
     });
 
     const trimmed = response.trim().toLowerCase();
 
-    if (trimmed === 'y' || trimmed === 'yes') {
+    if (trimmed === "y" || trimmed === "yes") {
       return { type: UserAction.APPROVE };
     }
 
-    if (trimmed === 'n' || trimmed === 'no' || trimmed === '') {
+    if (trimmed === "n" || trimmed === "no" || trimmed === "") {
       return { type: UserAction.REJECT };
     }
 
@@ -595,31 +793,38 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
   /**
    * Update conversation history with user modification
    */
-  private updateConversationHistory(context: CommandContext, userInput: string): void {
+  private updateConversationHistory(
+    context: CommandContext,
+    userInput: string,
+  ): void {
     if (!context.currentAnalysis) return;
 
     context.conversationHistory.push(
       {
         role: "user",
-        content: context.query === context.originalQuery
-          ? `I want to: ${context.query}`
-          : `Based on our previous discussion, I want to: ${context.query}`
+        content:
+          context.query === context.originalQuery
+            ? `I want to: ${context.query}`
+            : `Based on our previous discussion, I want to: ${context.query}`,
       },
       {
         role: "assistant",
-        content: `I suggest this command: ${context.currentAnalysis.command}\n\nExplanation: ${context.currentAnalysis.explanation}`
+        content: `I suggest this command: ${context.currentAnalysis.command}\n\nExplanation: ${context.currentAnalysis.explanation}`,
       },
       {
         role: "user",
-        content: userInput
-      }
+        content: userInput,
+      },
     );
   }
 
   /**
    * Add failure context to conversation history
    */
-  private addFailureToHistory(context: CommandContext, failureAnalysis: FailureAnalysis): void {
+  private addFailureToHistory(
+    context: CommandContext,
+    failureAnalysis: FailureAnalysis,
+  ): void {
     if (!context.lastError || !context.currentAnalysis) return;
 
     const failureMessage = failureAnalysis.alternativeCommand
@@ -629,12 +834,12 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
     context.conversationHistory.push(
       {
         role: "user",
-        content: "Execute the command"
+        content: "Execute the command",
       },
       {
         role: "assistant",
-        content: failureMessage
-      }
+        content: failureMessage,
+      },
     );
   }
 
@@ -647,8 +852,15 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
     if (this.verbose) {
       console.log(chalk.gray(`\n${analysis.explanation}`));
 
-      if (analysis.requiresExternalPackages && analysis.externalPackages?.length) {
-        console.log(chalk.yellow(`\nRequires external packages: ${analysis.externalPackages.join(', ')}`));
+      if (
+        analysis.requiresExternalPackages &&
+        analysis.externalPackages?.length
+      ) {
+        console.log(
+          chalk.yellow(
+            `\nRequires external packages: ${analysis.externalPackages.join(", ")}`,
+          ),
+        );
       }
     }
 
@@ -680,8 +892,13 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
    * Check if error is permission-related
    */
   private isPermissionError(stderr: string): boolean {
-    return stderr.includes("Permission denied") ||
-           stderr.includes("Operation not permitted");
+    return (
+      stderr.includes("Permission denied") ||
+      stderr.includes("Operation not permitted") ||
+      stderr.includes("Sorry, try again") ||
+      stderr.includes("sudo: 3 incorrect password attempts") ||
+      stderr.includes("authentication failure")
+    );
   }
 }
 
