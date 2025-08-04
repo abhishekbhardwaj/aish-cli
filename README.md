@@ -473,6 +473,8 @@ git push origin v1.0.1
 
 - [ ] **CLI Copilot/Co-driver**: A fully guided terminal experience to give you a complete copilot experience for the terminal. It'll also let you SSH into remote systems and run assistive commands making it easier to manage local and remote systems.
 
+- [ ] **SQL Copilot/Co-driver**: Enable Aish to assist with SQL queries, database management, and data analysis tasks. It will be hooked into all major SQL databases.
+
 - [ ] **Code Copilot/Co-driver**: Enable Aish to assist with autonomous code generation, debugging, and refactoring tasks. It will be hooked into all major LSP's and will be able to autonomously also find and fix bugs in your codebase, suggest improvements, and even write tests.
 
 - [ ] **Smart Ask Mode**: Enhance the `ask` command to automatically search through local files, shell history, and clipboard content to provide more context-aware responses. It'll also let user make web searches and web fetches to provide more accurate, relevant and up-to-date answers.
