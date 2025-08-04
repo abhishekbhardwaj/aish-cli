@@ -6,6 +6,8 @@ Your AI-powered command line assistant that supports multiple providers and mode
 
 *Demo showing AISH in action. [Download MP4 version](assets/aish.mp4) for better quality.*
 
+> Over time, I have collected a lot of useful commands, scripts, and workflows that I use daily. AISH is my attempt to properly organize them and make them available to everyone.
+
 ## 🚀 Installation
 
 ### Quick Install (Recommended)
@@ -469,13 +471,17 @@ git push origin v1.0.1
 
 ## 🗺️ Roadmap
 
-- [ ] **Agent**: Enable Aish to act autonomously, performing tasks or sequences of commands based on user instructions.
+- [ ] **CLI Copilot/Co-driver**: A fully guided terminal experience to give you a complete copilot experience for the terminal. It'll also let you SSH into remote systems and run assistive commands making it easier to manage local and remote systems.
 
-- [ ] **Workflows**: Allow users to create, manage, and execute a series of **agents**, written above. Sequences of CLI commands or tasks. This will also allow users to save and share workflows, making it easier to automate repetitive processes.
+- [ ] **Code Copilot/Co-driver**: Enable Aish to assist with autonomous code generation, debugging, and refactoring tasks. It will be hooked into all major LSP's and will be able to autonomously also find and fix bugs in your codebase, suggest improvements, and even write tests.
+
+- [ ] **Smart Ask Mode**: Enhance the `ask` command to automatically search through local files, shell history, and clipboard content to provide more context-aware responses. It'll also let user make web searches and web fetches to provide more accurate, relevant and up-to-date answers.
 
 - [ ] **Research**: Allow Aish to perform research tasks, such as gathering information from the web, files from local filesystem, summarizing articles, or finding relevant documentation based on user queries. Once done, it'll generate a complete report.
 
-- [ ] **Pilot**: A fully guided terminal experience to give you a complete copilot experience.
+- [ ] **Agent**: Enable Aish to act autonomously, performing tasks or sequences of commands based on user instructions. Teach it how to perform specific tasks, and it will execute them without further input.
+
+- [ ] **Workflows**: Allow users to create, manage, and execute a series of **agents**, written above. Sequences of CLI commands or tasks. This will also allow users to save and share workflows, making it easier to automate repetitive processes.
 
 ## 🔍 Troubleshooting
 
