@@ -103,6 +103,12 @@ interface CommandContext {
     stdout: string;
     stderr: string;
   };
+  // Successful execution output (used for jsonMode quiet capture)
+  lastSuccess?: {
+    command: string;
+    stdout: string;
+    stderr: string;
+  };
   isSudoRetry?: boolean;
   sudoAttempts?: number;
   // Added for extended features
@@ -193,7 +199,10 @@ class CommandExecutor {
         abortedReason: context.abortedReason,
         originalQuery: context.originalQuery,
         finalQuery: context.query,
-        finalCommand: context.currentAnalysis?.command || context.lastError?.command,
+        finalCommand:
+          context.currentAnalysis?.command ||
+          context.lastError?.command ||
+          context.lastSuccess?.command,
         explanation: context.currentAnalysis?.explanation,
         attempts: context.attemptCount,
         failures: context.failures.map((f) => ({
@@ -205,7 +214,12 @@ class CommandExecutor {
           stderr: f.stderr,
           stdout: f.stdout,
         })),
-        alternativesTried: context.failures.filter((f) => f.alternativeCommand).length,
+        alternativesTried: context.failures.filter((f) => f.alternativeCommand)
+          .length,
+        finalStdout:
+          context.lastSuccess?.stdout || context.lastError?.stdout || undefined,
+        finalStderr:
+          context.lastSuccess?.stderr || context.lastError?.stderr || undefined,
       };
       // Ensure single line JSON for easier parsing
       console.log(JSON.stringify(summary));
@@ -266,8 +280,8 @@ class CommandExecutor {
       return;
     }
 
-    // Auto-approve path (non-interactive)
-    if (context.autoApprove) {
+    // Auto-approve path (non-interactive OR json mode)
+    if (context.autoApprove || context.jsonMode) {
       context.state = CommandState.EXECUTING;
       return;
     }
@@ -317,6 +331,12 @@ class CommandExecutor {
     context.isSudoRetry = false;
 
     if (result.exitCode === 0) {
+      // Record success output for JSON summary (especially when suppressed)
+      context.lastSuccess = {
+        command: context.currentAnalysis.command,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
       // Reset sudo attempts on success
       context.sudoAttempts = 0;
       context.state = CommandState.SUCCESS;
@@ -499,51 +519,13 @@ class CommandExecutor {
     query: string,
     conversationHistory: ModelMessage[],
   ): Promise<CommandAnalysis> {
-    const normalized = query.toLowerCase();
     const systemPrompt =
       "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
 
     const userContent =
       conversationHistory.length > 0
-        ? `Based on our conversation, analyze this request and generate an appropriate shell command: "${query}"
-
-Return a JSON object with these exact fields:
-{
-  "command": "the shell command to execute",
-  "explanation": "brief explanation of what the command does",
-  "isDangerous": false,
-  "requiresExternalPackages": false,
-  "externalPackages": [],
-  "needsInteractiveMode": false
-}
-
-Set isDangerous to true ONLY for commands that could cause irreversible system damage or data loss (like rm -rf /, format, dd, etc.).
-Common development operations like removing lock files, node_modules, build artifacts, or temporary files are NOT dangerous.
-Set requiresExternalPackages to true and list packages if external tools are needed.
-Set needsInteractiveMode to true if the user's intent is clearly to open/run an interactive program (like "open vim", "start nano", "run python interactively", "launch htop", etc.) or if the program they're trying to run is interactive in your knowledge. If unsure, assume false.
-
-For file searches, prefer searching in user directories (~) rather than system-wide (/) to avoid permission issues and long execution times.
-
-JSON only:`
-        : `Analyze this user query and generate an appropriate shell command: "${query}"
-
-Return a JSON object with these exact fields:
-{
-  "command": "the shell command to execute",
-  "explanation": "brief explanation of what the command does",
-  "isDangerous": false,
-  "requiresExternalPackages": false,
-  "externalPackages": [],
-  "needsInteractiveMode": false
-}
-
-Set isDangerous to true ONLY for commands that could cause irreversible system damage or data loss.
-Common development operations are NOT dangerous.
-Set needsInteractiveMode to true if the user's intent is clearly to open/run an interactive program (like "open vim", "start nano", "run python interactively", "launch htop", etc.).
-
-For file searches, prefer searching in user directories (~) rather than system-wide (/).
-
-JSON only:`;
+        ? `Based on our conversation, analyze this request and generate an appropriate shell command: "${query}"\n\nReturn a JSON object with these exact fields:\n{\n  "command": "the shell command to execute",\n  "explanation": "brief explanation of what the command does",\n  "isDangerous": false,\n  "requiresExternalPackages": false,\n  "externalPackages": [],\n  "needsInteractiveMode": false\n}\n\nSet isDangerous to true ONLY for commands that could cause irreversible system damage or data loss (like rm -rf /, format, dd, etc.).\nCommon development operations like removing lock files, node_modules, build artifacts, or temporary files are NOT dangerous.\nSet requiresExternalPackages to true and list packages if external tools are needed.\nSet needsInteractiveMode to true if the user's intent is clearly to open/run an interactive program (like "open vim", "start nano", "run python interactively", "launch htop", etc.) or if the program they're trying to run is interactive in your knowledge. If unsure, assume false.\n\nFor file searches, prefer searching in user directories (~) rather than system-wide (/) to avoid permission issues and long execution times.\n\nJSON only:`
+        : `Analyze this user query and generate an appropriate shell command: "${query}"\n\nReturn a JSON object with these exact fields:\n{\n  "command": "the shell command to execute",\n  "explanation": "brief explanation of what the command does",\n  "isDangerous": false,\n  "requiresExternalPackages": false,\n  "externalPackages": [],\n  "needsInteractiveMode": false\n}\n\nSet isDangerous to true ONLY for commands that could cause irreversible system damage or data loss.\nCommon development operations are NOT dangerous.\nSet needsInteractiveMode to true if the user's intent is clearly to open/run an interactive program (like "open vim", "start nano", "run python interactively", "launch htop", etc.).\n\nFor file searches, prefer searching in user directories (~) rather than system-wide (/).\n\nJSON only:`;
 
     const environmentInfo = `Environment Context:\nOS: ${os.type()} ${os.release()} (${os.platform()} ${os.arch()})\nDate: ${new Date().toISOString().split('T')[0]}\nCWD: ${process.cwd()}\n\nInstructions:\n- Only propose commands valid for this OS.\n- Avoid Linux-specific /proc paths on macOS (darwin).\n- Prefer portable POSIX utilities when possible.\n- If the user's request is impossible without additional tools or privileges, still produce a safe explanatory command (e.g., an echo) and keep isDangerous=false.`;
 
@@ -582,43 +564,7 @@ JSON only:`;
     const systemPrompt =
       "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
 
-    const userPrompt = `A command failed with the following details:
-
-Command: ${error.command}
-Exit Code: ${error.exitCode}
-Standard Output: ${error.stdout || "(none)"}
-Standard Error: ${error.stderr || "(none)"}
-Original User Query: "${query}"
-
-Based on our conversation history (if any) and these details, analyze the failure.
-
-Return a JSON object with these exact fields:
-{
-  "explanation": "brief explanation of why the command failed (1-2 sentences max)",
-  "solution": "how to fix the issue or what the user should do (1-2 sentences max)",
-  "alternativeCommand": "alternative command to try (or null ONLY if absolutely no alternative exists)",
-  "needsInteractiveMode": false
-}
-
-IMPORTANT: You should ALMOST ALWAYS provide an alternativeCommand that attempts to fulfill the user's original request. Look at the error message and suggest a command that will work. For example:
-- If a flag isn't recognized, suggest the command without that flag or with an equivalent
-- If permission denied, suggest with sudo or in a different directory
-- If a tool doesn't exist, suggest an alternative tool that achieves the same goal
-- If a file/directory doesn't exist, suggest creating it or using a different path
-
-Only return null for alternativeCommand in cases where:
-- The user needs to install software first (but even then, try to suggest the install command)
-- The request is physically impossible (e.g., accessing hardware that doesn't exist)
-- The command requires user-specific information you don't have
-
-IMPORTANT: Set needsInteractiveMode to true ONLY if ALL of these conditions are met:
-1. The failure was clearly caused by missing TTY/terminal (errors like "not a terminal", "no tty", input/output redirection issues)
-2. The alternative command you're suggesting is an interactive program (vim, nano, htop, etc.)
-3. Double-check: Does this alternative command actually need TTY to function properly?
-
-If you're unsure about ANY of these conditions, set needsInteractiveMode to false. Be extremely conservative.
-
-Be very concise and helpful. Keep explanations short. JSON only:`;
+    const userPrompt = `A command failed with the following details:\n\nCommand: ${error.command}\nExit Code: ${error.exitCode}\nStandard Output: ${error.stdout || "(none)"}\nStandard Error: ${error.stderr || "(none)"}\nOriginal User Query: "${query}"\n\nBased on our conversation history (if any) and these details, analyze the failure.\n\nReturn a JSON object with these exact fields:\n{\n  "explanation": "brief explanation of why the command failed (1-2 sentences max)",\n  "solution": "how to fix the issue or what the user should do (1-2 sentences max)",\n  "alternativeCommand": "alternative command to try (or null ONLY if absolutely no alternative exists)",\n  "needsInteractiveMode": false\n}\n\nIMPORTANT: You should ALMOST ALWAYS provide an alternativeCommand that attempts to fulfill the user's original request. Look at the error message and suggest a command that will work. For example:\n- If a flag isn't recognized, suggest the command without that flag or with an equivalent\n- If permission denied, suggest with sudo or in a different directory\n- If a tool doesn't exist, suggest an alternative tool that achieves the same goal\n- If a file/directory doesn't exist, suggest creating it or using a different path\n\nOnly return null for alternativeCommand in cases where:\n- The user needs to install software first (but even then, try to suggest the install command)\n- The request is physically impossible (e.g., accessing hardware that doesn't exist)\n- The command requires user-specific information you don't have\n\nIMPORTANT: Set needsInteractiveMode to true ONLY if ALL of these conditions are met:\n1. The failure was clearly caused by missing TTY/terminal (errors like "not a terminal", "no tty", input/output redirection issues)\n2. The alternative command you're suggesting is an interactive program (vim, nano, htop, etc.)\n3. Double-check: Does this alternative command actually need TTY to function properly?\n\nIf you're unsure about ANY of these conditions, set needsInteractiveMode to false. Be extremely conservative.\n\nBe very concise and helpful. Keep explanations short. JSON only:`;
 
     const failureEnvInfo = `Environment Context:\nOS: ${os.type()} ${os.release()} (${os.platform()} ${os.arch()})\nDate: ${new Date().toISOString().split('T')[0]}\nCWD: ${process.cwd()}\n\nValidation Rules:\n- Suggest only commands valid for this OS.\n- Avoid Linux-specific /proc paths on macOS.\n- If hardware metrics or privileged data are requested and unavailable without new tools, return alternativeCommand null with a concise explanation unless a standard built-in utility suffices.\n- Prefer safe existence checks (test -f, test -d) before operations.\n- Never hallucinate files or system paths.`;
 
@@ -693,7 +639,7 @@ Be very concise and helpful. Keep explanations short. JSON only:`;
       child.on("close", (code) => {
         if (!resolved) {
           resolved = true;
-          resolve({
+            resolve({
             exitCode: code || 0,
             stdout: "",
             stderr: stderr,
@@ -758,6 +704,7 @@ Be very concise and helpful. Keep explanations short. JSON only:`;
     return new Promise((resolve) => {
       const wrappedCommand = `set -o pipefail; ${command}`;
       const useInteractive = this.forceTTY || needsInteractiveMode;
+      const suppressOutput = this.jsonMode && this.autoApprove && !useInteractive;
 
       // Only use piped stdin if we need to send a password
       const needsPipedStdin = sudoPassword && !command.includes("|");
@@ -801,7 +748,7 @@ Be very concise and helpful. Keep explanations short. JSON only:`;
           // For sudo commands, add newline before first real output
           if (sudoPassword && !firstOutputReceived && output.trim()) {
             firstOutputReceived = true;
-            process.stdout.write("\n");
+            if (!suppressOutput) process.stdout.write("\n");
           }
 
           // Filter out password prompts from sudo
@@ -809,7 +756,7 @@ Be very concise and helpful. Keep explanations short. JSON only:`;
             /^(Password|Mot de passe|Contraseña|Passwort|パスワード|密码|Пароль):\s*$/m;
           const filteredOutput = output.replace(passwordPromptRegex, "");
           if (filteredOutput.trim()) {
-            process.stdout.write(filteredOutput);
+            if (!suppressOutput) process.stdout.write(filteredOutput);
           }
           stdout += output;
         });
@@ -829,9 +776,9 @@ Be very concise and helpful. Keep explanations short. JSON only:`;
             // For sudo commands, add newline before first real error output
             if (sudoPassword && !firstOutputReceived && output.trim()) {
               firstOutputReceived = true;
-              process.stderr.write("\n");
+              if (!suppressOutput) process.stderr.write("\n");
             }
-            process.stderr.write(output);
+            if (!suppressOutput) process.stderr.write(output);
           }
 
           // If we see a password prompt and haven't sent password yet, send it
@@ -981,6 +928,7 @@ Be very concise and helpful. Keep explanations short. JSON only:`;
    * Display command analysis
    */
   private displayCommandAnalysis(analysis: CommandAnalysis): void {
+    // In jsonMode we suppress ALL non-JSON output
     if (!this.jsonMode) {
       console.log(chalk.cyan(analysis.command));
 
@@ -1094,7 +1042,7 @@ export function setupCommandCommand(program: Command): void {
       "--max-tries <n>",
       "maximum failed attempts before aborting (default 3)",
     )
-    .option("--json", "output final result summary as JSON")
+    .option("--json", "output final result summary as JSON (suppresses all non-JSON output and implies --yes)")
     .allowUnknownOption()
     .action(async (queryParts, options) => {
       const query = queryParts.join(" ");
@@ -1103,11 +1051,12 @@ export function setupCommandCommand(program: Command): void {
         : undefined;
       const verbose = options.verbose || false;
       const forceTTY = options.tty || false;
-      const autoApprove = options.yes || false;
-      const maxTries = options.maxTries
-        ? parseInt(options.maxTries)
-        : 3;
+      let autoApprove = options.yes || false;
+      const maxTries = options.maxTries ? parseInt(options.maxTries) : 3;
       const jsonMode = options.json || false;
+      if (jsonMode) {
+        autoApprove = true; // JSON mode implies non-interactive approval
+      }
 
       try {
         const config = loadConfig();
@@ -1120,7 +1069,7 @@ export function setupCommandCommand(program: Command): void {
         await handleCommandGeneration(
           model,
           query,
-            timeoutSeconds,
+          timeoutSeconds,
           verbose,
           forceTTY,
           autoApprove,

@@ -108,7 +108,7 @@ aish c "docker ps" --model gpt-4o                  # Use specific model
 - `--provider <provider>` - Override default AI provider
 - `--model <model>` - Override provider's preferred model
 - `--max-tries <n>` - Abort after n failed executions (default 3)
-- `--json` - Output final structured JSON summary (combine with `--yes` for scripting)
+- `--json` - Output ONLY the final structured JSON summary (implies `--yes`; suppresses all intermediate and live output; captured stdout/stderr provided via `finalStdout` / `finalStderr`).
 
 #### Non-Interactive & JSON Mode
 Use these flags together for scripting / automation:
@@ -142,10 +142,12 @@ echo "$summary" | jq .finalCommand
   "explanation": "Shows the current system date and time",
   "attempts": 0,
   "failures": [],
-  "alternativesTried": 0
+  "alternativesTried": 0,
+  "finalStdout": "Sat Jan 04 12:34:56 UTC 2025\n",
+  "finalStderr": ""
 }
 ```
-All fields appear on a single line in actual output to simplify parsing (pretty-printed here for readability).
+All fields are emitted as a single compact one-line JSON object in real execution. `finalStdout` / `finalStderr` appear only after a command attempt (success or failure). They are omitted if no execution occurred (e.g. dangerous-command abort).
 
 #### JSON Fields
 | Field | Description |
@@ -160,6 +162,8 @@ All fields appear on a single line in actual output to simplify parsing (pretty-
 | `attempts` | Number of failed command executions (non-zero exits) |
 | `failures[]` | Details per failed execution (stdout, stderr, explanation, solution) |
 | `alternativesTried` | Count of failures where an alternative command was executed |
+| `finalStdout` | Captured stdout of the last command attempt (success or failure) |
+| `finalStderr` | Captured stderr of the last command attempt (success or failure) |
 
 #### Aborted Reasons
 | Reason | Meaning |
@@ -177,10 +181,10 @@ All fields appear on a single line in actual output to simplify parsing (pretty-
 | `unexpected-error` | Unhandled runtime exception occurred |
 
 #### Tips
-- Combine `--yes --json` for CI pipelines.
+- Use `--json` for CI pipelines (auto-approves and suppresses live output).
 - Pipe to `jq` for assertions: `aish c "show date" -y --json | jq -r '.finalCommand'`.
 - Use `--max-tries 1` to fail fast for deterministic scripting.
-- In `--json` mode spinners and intermediate analysis/failure messages are suppressed (quiet output).
+- `--json` implies non-interactive mode and suppresses ALL non-JSON output (analysis, prompts, live stdout/stderr); final stdout/stderr are only available via `finalStdout` / `finalStderr` in the JSON line.
 
 #### JSON Mode Test Guidance
 Previously a helper script existed for deterministic JSON checks. That script has been removed. Use direct invocations combining `--yes`, `--json`, and optional `--max-tries` and validate the final line with `jq`.
