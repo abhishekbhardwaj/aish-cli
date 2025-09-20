@@ -156,7 +156,9 @@ if [[ -z $config_file ]]; then
     exit 1
 fi
 
+path_update_required=0
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    path_update_required=1
     case $current_shell in
         fish)
             add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
@@ -181,6 +183,8 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     esac
 fi
 
+
+
 if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" == "true" ]; then
     echo "$INSTALL_DIR" >> $GITHUB_PATH
     print_message info "Added $INSTALL_DIR to \$GITHUB_PATH"
@@ -201,4 +205,17 @@ print_message info "📚 To uninstall:"
 print_message info "  ${YELLOW}rm -f $INSTALL_DIR/aish"
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     print_message info "  ${YELLOW}# Remove PATH export from your shell config if added"
+fi
+
+if [[ $path_update_required -eq 1 ]]; then
+    echo
+    print_message info "🔄 Reload your shell so aish is available:"
+    case $current_shell in
+        fish)
+            print_message info "  ${YELLOW}source $config_file${GREEN}  # or open a new terminal"
+        ;;
+        *)
+            print_message info "  ${YELLOW}source $config_file${GREEN}  # or open a new terminal"
+        ;;
+    esac
 fi
