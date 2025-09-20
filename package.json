@@ -1,6 +1,6 @@
 {
   "name": "aish",
-  "version": "0.0.5",
+  "version": "0.1.0",
   "description": "AI Shell - Your AI-powered command line assistant",
   "module": "src/index.ts",
   "type": "module",
