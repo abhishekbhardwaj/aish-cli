@@ -9,7 +9,10 @@ import chalk from "chalk";
 import { input, password } from "@inquirer/prompts";
 import { spawn } from "child_process";
 import { z } from "zod";
-import type { LanguageModel, CoreMessage } from "ai";
+import { Command } from "commander";
+import os from "os";
+import { loadConfig } from "../config/config";
+import type { LanguageModel, ModelMessage } from "ai";
 import { loading } from "../components/ui/loading";
 import { generateStructured, generateAIText } from "../config/ai";
 
@@ -92,7 +95,7 @@ interface CommandContext {
   state: CommandState;
   query: string;
   originalQuery: string;
-  conversationHistory: CoreMessage[];
+  conversationHistory: ModelMessage[];
   currentAnalysis?: CommandAnalysis;
   lastError?: {
     command: string;
@@ -102,6 +105,21 @@ interface CommandContext {
   };
   isSudoRetry?: boolean;
   sudoAttempts?: number;
+  // Added for extended features
+  attemptCount: number; // number of failed executions so far
+  maxTries: number; // maximum failures allowed
+  failures: Array<{
+    command: string;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    explanation?: string;
+    solution?: string;
+    alternativeCommand?: string;
+  }>;
+  autoApprove: boolean;
+  jsonMode: boolean;
+  abortedReason?: string;
 }
 
 /**
@@ -112,17 +130,26 @@ class CommandExecutor {
   private timeoutMs?: number;
   private verbose: boolean;
   private forceTTY: boolean;
+  private autoApprove: boolean;
+  private maxTries: number;
+  private jsonMode: boolean;
 
   constructor(
     model: LanguageModel,
     timeoutMs?: number,
     verbose: boolean = false,
     forceTTY: boolean = false,
+    autoApprove: boolean = false,
+    maxTries: number = 3,
+    jsonMode: boolean = false,
   ) {
     this.model = model;
     this.timeoutMs = timeoutMs;
     this.verbose = verbose;
     this.forceTTY = forceTTY;
+    this.autoApprove = autoApprove;
+    this.maxTries = maxTries;
+    this.jsonMode = jsonMode;
   }
 
   /**
@@ -134,6 +161,11 @@ class CommandExecutor {
       query,
       originalQuery: query,
       conversationHistory: [],
+      attemptCount: 0,
+      maxTries: this.maxTries,
+      failures: [],
+      autoApprove: this.autoApprove,
+      jsonMode: this.jsonMode,
     };
 
     while (
@@ -148,8 +180,35 @@ class CommandExecutor {
             `❌ Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
           ),
         );
+        context.abortedReason ||= "unexpected-error";
         context.state = CommandState.ABORTED;
       }
+    }
+
+    // Emit JSON summary if requested
+    if (context.jsonMode) {
+      const summary = {
+        status: context.state,
+        success: context.state === CommandState.SUCCESS,
+        abortedReason: context.abortedReason,
+        originalQuery: context.originalQuery,
+        finalQuery: context.query,
+        finalCommand: context.currentAnalysis?.command || context.lastError?.command,
+        explanation: context.currentAnalysis?.explanation,
+        attempts: context.attemptCount,
+        failures: context.failures.map((f) => ({
+          command: f.command,
+          exitCode: f.exitCode,
+          explanation: f.explanation,
+          solution: f.solution,
+          alternativeCommand: f.alternativeCommand,
+          stderr: f.stderr,
+          stdout: f.stdout,
+        })),
+        alternativesTried: context.failures.filter((f) => f.alternativeCommand).length,
+      };
+      // Ensure single line JSON for easier parsing
+      console.log(JSON.stringify(summary));
     }
   }
 
@@ -189,6 +248,7 @@ class CommandExecutor {
     this.displayCommandAnalysis(analysis);
 
     if (analysis.isDangerous) {
+      context.abortedReason = "dangerous-command";
       context.state = CommandState.ABORTED;
       return;
     }
@@ -201,7 +261,14 @@ class CommandExecutor {
    */
   private async handleConfirming(context: CommandContext): Promise<void> {
     if (!context.currentAnalysis) {
+      context.abortedReason = context.abortedReason || "missing-analysis";
       context.state = CommandState.ABORTED;
+      return;
+    }
+
+    // Auto-approve path (non-interactive)
+    if (context.autoApprove) {
+      context.state = CommandState.EXECUTING;
       return;
     }
 
@@ -213,7 +280,7 @@ class CommandExecutor {
         break;
 
       case UserAction.REJECT:
-        console.log("aborted");
+        context.abortedReason = context.abortedReason || "user-rejected";
         context.state = CommandState.ABORTED;
         break;
 
@@ -235,6 +302,7 @@ class CommandExecutor {
    */
   private async handleExecuting(context: CommandContext): Promise<void> {
     if (!context.currentAnalysis) {
+      context.abortedReason = context.abortedReason || "missing-analysis";
       context.state = CommandState.ABORTED;
       return;
     }
@@ -257,6 +325,8 @@ class CommandExecutor {
         command: context.currentAnalysis.command,
         ...result,
       };
+      // Count this failed attempt
+      context.attemptCount += 1;
       context.state = CommandState.FAILED;
     }
   }
@@ -266,6 +336,7 @@ class CommandExecutor {
    */
   private async handleFailed(context: CommandContext): Promise<void> {
     if (!context.lastError || !context.currentAnalysis) {
+      context.abortedReason = context.abortedReason || "missing-error-context";
       context.state = CommandState.ABORTED;
       return;
     }
@@ -273,6 +344,15 @@ class CommandExecutor {
     // Handle timeout specifically
     if (context.lastError.exitCode === 124) {
       console.log(chalk.red("timed out"));
+      context.failures.push({
+        command: context.lastError.command,
+        exitCode: context.lastError.exitCode,
+        stdout: context.lastError.stdout,
+        stderr: context.lastError.stderr,
+        explanation: "Command timed out",
+        solution: "Increase timeout or optimize command",
+      });
+      context.abortedReason = context.abortedReason || "timeout";
       context.state = CommandState.ABORTED;
       return;
     }
@@ -290,14 +370,33 @@ class CommandExecutor {
       // Track sudo attempts
       context.sudoAttempts = (context.sudoAttempts || 0) + 1;
 
+      // Record this failure attempt
+      context.failures.push({
+        command: context.lastError.command,
+        exitCode: context.lastError.exitCode,
+        stdout: context.lastError.stdout,
+        stderr: context.lastError.stderr,
+        explanation: "Authentication failed (incorrect sudo password)",
+      });
+
       // Allow retry with same command (up to 3 attempts total)
       if (context.currentAnalysis && context.sudoAttempts < 3) {
         console.log(chalk.gray("Try again with the correct password."));
         context.isSudoRetry = true;
+        // Loop guard check before retrying
+        if (context.attemptCount >= context.maxTries) {
+          console.log(
+            chalk.red(`Max tries (${context.maxTries}) reached.`),
+          );
+          context.abortedReason = context.abortedReason || "max-tries-exceeded";
+          context.state = CommandState.ABORTED;
+          return;
+        }
         context.state = CommandState.EXECUTING; // Skip confirmation, go directly to execution
         return;
       } else if (context.sudoAttempts >= 3) {
         console.log(chalk.red("sudo: 3 incorrect password attempts"));
+        context.abortedReason = context.abortedReason || "sudo-auth-failed";
         context.state = CommandState.ABORTED;
         return;
       }
@@ -305,9 +404,12 @@ class CommandExecutor {
 
     // Handle other permission errors
     if (this.isPermissionError(context.lastError.stderr)) {
-      console.log(chalk.red("\nPermission denied."));
-      context.state = CommandState.ABORTED;
-      return;
+      console.log(
+        chalk.red(
+          "\nPermission denied. Attempting analysis for alternative (e.g., with sudo)",
+        ),
+      );
+      // Continue to failure analysis instead of aborting
     }
 
     try {
@@ -322,6 +424,25 @@ class CommandExecutor {
       // Always add failure context to conversation history
       this.addFailureToHistory(context, failureAnalysis);
 
+      // Record failure details
+      context.failures.push({
+        command: context.lastError.command,
+        exitCode: context.lastError.exitCode,
+        stdout: context.lastError.stdout,
+        stderr: context.lastError.stderr,
+        explanation: failureAnalysis.explanation,
+        solution: failureAnalysis.solution,
+        alternativeCommand: failureAnalysis.alternativeCommand || undefined,
+      });
+
+      // Loop guard after recording failure
+      if (context.attemptCount >= context.maxTries) {
+        console.log(chalk.red(`Max tries (${context.maxTries}) reached.`));
+        context.abortedReason = context.abortedReason || "max-tries-exceeded";
+        context.state = CommandState.ABORTED;
+        return;
+      }
+
       if (failureAnalysis.alternativeCommand) {
         // Update context for alternative command
         context.currentAnalysis = {
@@ -331,14 +452,23 @@ class CommandExecutor {
           needsInteractiveMode: failureAnalysis.needsInteractiveMode,
         };
 
-        context.state = CommandState.CONFIRMING;
+        // Auto-approve path skips confirmation
+        context.state = context.autoApprove
+          ? CommandState.EXECUTING
+          : CommandState.CONFIRMING;
       } else {
-        // Even without alternative command, allow user to modify
+        // Even without alternative command, allow user to modify unless autoApprove
         console.log(
           chalk.gray(
             "\nNo alternative command suggested. You can modify the request or abort.",
           ),
         );
+
+        if (context.autoApprove) {
+          context.abortedReason = context.abortedReason || "no-alternative";
+          context.state = CommandState.ABORTED;
+          return;
+        }
 
         // Prompt for user action
         const userAction = await this.promptUser("Try a different approach?");
@@ -348,6 +478,7 @@ class CommandExecutor {
           context.query = userAction.input;
           context.state = CommandState.ANALYZING;
         } else {
+          context.abortedReason = context.abortedReason || "user-aborted";
           context.state = CommandState.ABORTED;
         }
       }
@@ -356,6 +487,7 @@ class CommandExecutor {
       if (error instanceof Error) {
         console.error(chalk.red(`Analysis error: ${error.message}`));
       }
+      context.abortedReason = context.abortedReason || "failure-analysis-error";
       context.state = CommandState.ABORTED;
     }
   }
@@ -365,8 +497,9 @@ class CommandExecutor {
    */
   private async analyzeCommand(
     query: string,
-    conversationHistory: CoreMessage[],
+    conversationHistory: ModelMessage[],
   ): Promise<CommandAnalysis> {
+    const normalized = query.toLowerCase();
     const systemPrompt =
       "You are a shell command expert. You MUST respond with valid JSON only, no other text or formatting.";
 
@@ -412,19 +545,22 @@ For file searches, prefer searching in user directories (~) rather than system-w
 
 JSON only:`;
 
-    const messages: CoreMessage[] = [
+    const environmentInfo = `Environment Context:\nOS: ${os.type()} ${os.release()} (${os.platform()} ${os.arch()})\nDate: ${new Date().toISOString().split('T')[0]}\nCWD: ${process.cwd()}\n\nInstructions:\n- Only propose commands valid for this OS.\n- Avoid Linux-specific /proc paths on macOS (darwin).\n- Prefer portable POSIX utilities when possible.\n- If the user's request is impossible without additional tools or privileges, still produce a safe explanatory command (e.g., an echo) and keep isDangerous=false.`;
+
+    const messages: ModelMessage[] = [
       ...conversationHistory,
-      { role: "user", content: userContent },
+      { role: "user", content: environmentInfo + "\n\n" + userContent },
     ];
 
-    const result = await loading.withLoading(
-      generateStructured(this.model, {
-        schema: CommandAnalysisSchema,
-        system: systemPrompt,
-        messages,
-      }),
-      "Writing command",
-    );
+    // Suppress spinner in jsonMode for clean automation output
+    const analysisPromise = generateStructured(this.model, {
+      schema: CommandAnalysisSchema,
+      system: systemPrompt,
+      messages,
+    });
+    const result = this.jsonMode
+      ? await analysisPromise
+      : await loading.withLoading(analysisPromise, "Writing command");
 
     if (!result.data) {
       throw new Error("Failed to analyze command");
@@ -439,7 +575,7 @@ JSON only:`;
   private async analyzeFailure(
     error: CommandContext["lastError"],
     query: string,
-    conversationHistory: CoreMessage[],
+    conversationHistory: ModelMessage[],
   ): Promise<FailureAnalysis> {
     if (!error) throw new Error("No error to analyze");
 
@@ -484,32 +620,30 @@ If you're unsure about ANY of these conditions, set needsInteractiveMode to fals
 
 Be very concise and helpful. Keep explanations short. JSON only:`;
 
-    const messages: CoreMessage[] = [
+    const failureEnvInfo = `Environment Context:\nOS: ${os.type()} ${os.release()} (${os.platform()} ${os.arch()})\nDate: ${new Date().toISOString().split('T')[0]}\nCWD: ${process.cwd()}\n\nValidation Rules:\n- Suggest only commands valid for this OS.\n- Avoid Linux-specific /proc paths on macOS.\n- If hardware metrics or privileged data are requested and unavailable without new tools, return alternativeCommand null with a concise explanation unless a standard built-in utility suffices.\n- Prefer safe existence checks (test -f, test -d) before operations.\n- Never hallucinate files or system paths.`;
+
+    const messages: ModelMessage[] = [
       ...conversationHistory,
-      { role: "user", content: userPrompt },
+      { role: "user", content: failureEnvInfo + "\n\n" + userPrompt },
     ];
 
-    const result = await loading.withLoading(
-      generateStructured(this.model, {
-        schema: FailureAnalysisSchema,
-        system: systemPrompt,
-        messages,
-      }),
-      "Analyzing failure",
-    );
+    // Suppress spinner in jsonMode
+    const failurePromise = generateStructured(this.model, {
+      schema: FailureAnalysisSchema,
+      system: systemPrompt,
+      messages,
+    });
+    const result = this.jsonMode
+      ? await failurePromise
+      : await loading.withLoading(failurePromise, "Analyzing failure");
 
     if (!result.data) {
       // Fallback to plain text analysis
-      const fallbackMessages: CoreMessage[] = [
+      const fallbackMessages: ModelMessage[] = [
         ...conversationHistory,
         {
           role: "user",
-          content: `A command failed: ${error.command}
-Exit Code: ${error.exitCode}
-Error: ${error.stderr}
-Original user query: "${query}"
-
-Briefly explain why it failed and how to fix it (1-2 sentences max).`,
+          content: `${failureEnvInfo}\n\nA command failed: ${error.command}\nExit Code: ${error.exitCode}\nError: ${error.stderr}\nOriginal user query: "${query}"\n\nBriefly explain why it failed and how to fix it (1-2 sentences max).`,
         },
       ];
 
@@ -684,7 +818,7 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
           const output = data.toString();
 
           // Check if this is a sudo password prompt
-          const isSudoPrompt =
+            const isSudoPrompt =
             output.includes("[sudo]") ||
             output.match(
               /^(Password|Mot de passe|Contraseña|Passwort|パスワード|密码|Пароль):\s*$/m,
@@ -695,7 +829,7 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
             // For sudo commands, add newline before first real error output
             if (sudoPassword && !firstOutputReceived && output.trim()) {
               firstOutputReceived = true;
-              process.stdout.write("\n");
+              process.stderr.write("\n");
             }
             process.stderr.write(output);
           }
@@ -847,29 +981,31 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
    * Display command analysis
    */
   private displayCommandAnalysis(analysis: CommandAnalysis): void {
-    console.log(chalk.cyan(analysis.command));
+    if (!this.jsonMode) {
+      console.log(chalk.cyan(analysis.command));
 
-    if (this.verbose) {
-      console.log(chalk.gray(`\n${analysis.explanation}`));
+      if (this.verbose) {
+        console.log(chalk.gray(`\n${analysis.explanation}`));
 
-      if (
-        analysis.requiresExternalPackages &&
-        analysis.externalPackages?.length
-      ) {
+        if (
+          analysis.requiresExternalPackages &&
+          analysis.externalPackages?.length
+        ) {
+          console.log(
+            chalk.yellow(
+              `\nRequires external packages: ${analysis.externalPackages.join(", ")}`,
+            ),
+          );
+        }
+      }
+
+      if (analysis.isDangerous) {
         console.log(
-          chalk.yellow(
-            `\nRequires external packages: ${analysis.externalPackages.join(", ")}`,
+          chalk.red(
+            "[BLOCKED] This command is potentially dangerous and cannot be executed.",
           ),
         );
       }
-    }
-
-    if (analysis.isDangerous) {
-      console.log(
-        chalk.red(
-          "[BLOCKED] This command is potentially dangerous and cannot be executed.",
-        ),
-      );
     }
   }
 
@@ -877,14 +1013,16 @@ Briefly explain why it failed and how to fix it (1-2 sentences max).`,
    * Display failure analysis
    */
   private displayFailureAnalysis(analysis: FailureAnalysis): void {
-    console.log(chalk.gray(analysis.explanation));
+    if (!this.jsonMode) {
+      console.log(chalk.gray(analysis.explanation));
 
-    if (this.verbose && analysis.solution !== analysis.explanation) {
-      console.log(chalk.gray(`\nSolution: ${analysis.solution}`));
-    }
+      if (this.verbose && analysis.solution !== analysis.explanation) {
+        console.log(chalk.gray(`\nSolution: ${analysis.solution}`));
+      }
 
-    if (analysis.alternativeCommand) {
-      console.log(chalk.cyan(analysis.alternativeCommand));
+      if (analysis.alternativeCommand) {
+        console.log(chalk.cyan(analysis.alternativeCommand));
+      }
     }
   }
 
@@ -911,10 +1049,92 @@ export async function handleCommandGeneration(
   timeoutSeconds?: number,
   verbose: boolean = false,
   forceTTY: boolean = false,
+  autoApprove: boolean = false,
+  maxTries: number = 3,
+  jsonMode: boolean = false,
 ): Promise<void> {
   const timeoutMs = timeoutSeconds ? timeoutSeconds * 1000 : undefined;
-  const executor = new CommandExecutor(model, timeoutMs, verbose, forceTTY);
+  const executor = new CommandExecutor(
+    model,
+    timeoutMs,
+    verbose,
+    forceTTY,
+    autoApprove,
+    maxTries,
+    jsonMode,
+  );
   await executor.execute(query);
+}
+
+/**
+ * Registers the command generation feature with the CLI program
+ */
+export function setupCommandCommand(program: Command): void {
+  program
+    .command("command")
+    .alias("c")
+    .description("Generate and execute shell commands using AI")
+    .argument(
+      "<query...>",
+      "natural language description of what you want to do",
+    )
+    .option(
+      "-t, --timeout <seconds>",
+      "timeout in seconds (no timeout by default)",
+    )
+    .option("--tty", "force interactive/TTY mode for the command")
+    .option("-v, --verbose", "show detailed explanations and context")
+    .option("--provider <provider>", "AI provider to use (overrides default)")
+    .option(
+      "--model <model>",
+      "model to use (overrides provider's preferred model)",
+    )
+    .option("-y, --yes", "auto-approve and run commands without prompting")
+    .option(
+      "--max-tries <n>",
+      "maximum failed attempts before aborting (default 3)",
+    )
+    .option("--json", "output final result summary as JSON")
+    .allowUnknownOption()
+    .action(async (queryParts, options) => {
+      const query = queryParts.join(" ");
+      const timeoutSeconds = options.timeout
+        ? parseInt(options.timeout)
+        : undefined;
+      const verbose = options.verbose || false;
+      const forceTTY = options.tty || false;
+      const autoApprove = options.yes || false;
+      const maxTries = options.maxTries
+        ? parseInt(options.maxTries)
+        : 3;
+      const jsonMode = options.json || false;
+
+      try {
+        const config = loadConfig();
+        const { createModelWithOverride } = await import("../config/ai");
+        const model = createModelWithOverride(
+          config,
+          options.provider,
+          options.model,
+        );
+        await handleCommandGeneration(
+          model,
+          query,
+            timeoutSeconds,
+          verbose,
+          forceTTY,
+          autoApprove,
+          maxTries,
+          jsonMode,
+        );
+      } catch (error) {
+        console.log(
+          chalk.red(
+            `❌ Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
+          ),
+        );
+      }
+    });
 }
 
 // Export for testing

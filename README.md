@@ -20,14 +20,14 @@ This installs AISH to `~/.local/bin/aish` (following XDG Base Directory specific
 
 **After installation, configure your AI provider:**
 ```bash
-aish configure  # Set up your AI provider and API key first
+aish config  # Set up your AI provider and API key first
 ```
 
 ### Install Specific Version
 
 ```bash
 VERSION=v1.2.3 curl -fsSL https://raw.githubusercontent.com/abhishekbhardwaj/aish-cli/main/scripts/install.sh | bash
-# Then configure: aish configure
+# Then configure: aish config
 ```
 
 ### Manual Installation
@@ -36,7 +36,7 @@ VERSION=v1.2.3 curl -fsSL https://raw.githubusercontent.com/abhishekbhardwaj/ais
 2. Extract the archive: `tar -xzf aish-*.tar.gz` (or unzip for Windows)
 3. Make executable: `chmod +x aish`
 4. Move to PATH: `mv aish ~/.local/bin/` (or `/usr/local/bin/` with sudo)
-5. **Configure your AI provider:** `aish configure`
+5. **Configure your AI provider:** `aish config`
 
 ### Build from Source
 
@@ -45,7 +45,7 @@ git clone https://github.com/abhishekbhardwaj/aish-cli.git
 cd aish
 bun install
 bun run build
-# Configure after building: ./aish configure
+# Configure after building: ./aish config
 ```
 
 ## 📖 Commands Reference
@@ -104,8 +104,117 @@ aish c "docker ps" --model gpt-4o                  # Use specific model
 - `-t, --timeout <seconds>` - Command timeout (no timeout by default)
 - `--tty` - Force interactive/TTY mode for the command
 - `-v, --verbose` - Show detailed explanations and context
+- `-y, --yes` - Auto-approve and run without confirmation
 - `--provider <provider>` - Override default AI provider
 - `--model <model>` - Override provider's preferred model
+- `--max-tries <n>` - Abort after n failed executions (default 3)
+- `--json` - Output final structured JSON summary (combine with `--yes` for scripting)
+
+#### Non-Interactive & JSON Mode
+Use these flags together for scripting / automation:
+```bash
+# Basic non-interactive run with structured output
+aish c "show current date" -y --json
+
+# Abort after first failure (loop guard)
+aish c "execute program named totally_fake_binary_xyz" -y --max-tries 1 --json
+
+# Capture JSON for further processing
+summary=$(aish c "show disk usage" -y --json)
+echo "$summary" | jq .finalCommand
+```
+
+#### Loop Guard Semantics (`--max-tries`)
+- Counts only failed command executions (non-zero exit codes). Analysis / confirmation steps do not count.
+- Dangerous command detection aborts before execution (attempts remains 0).
+- Each incorrect sudo password execution counts toward attempts.
+- Timeout counts as a failed attempt then aborts with `abortedReason=timeout`.
+
+#### Sample JSON Output
+```json
+{
+  "status": "success",
+  "success": true,
+  "abortedReason": null,
+  "originalQuery": "show current date",
+  "finalQuery": "show current date",
+  "finalCommand": "date",
+  "explanation": "Shows the current system date and time",
+  "attempts": 0,
+  "failures": [],
+  "alternativesTried": 0
+}
+```
+All fields appear on a single line in actual output to simplify parsing (pretty-printed here for readability).
+
+#### JSON Fields
+| Field | Description |
+|-------|-------------|
+| `status` | `success` or `aborted` |
+| `success` | Boolean convenience mirror of status |
+| `abortedReason` | Reason for abort (omitted or null if success) |
+| `originalQuery` | User's initial natural language description |
+| `finalQuery` | Last refined query (if modified) |
+| `finalCommand` | Command executed last (or analyzed if aborted before run) |
+| `explanation` | Explanation of final command (if available) |
+| `attempts` | Number of failed command executions (non-zero exits) |
+| `failures[]` | Details per failed execution (stdout, stderr, explanation, solution) |
+| `alternativesTried` | Count of failures where an alternative command was executed |
+
+#### Aborted Reasons
+| Reason | Meaning |
+|--------|---------|
+| `dangerous-command` | Model flagged command as destructive; never executed |
+| `timeout` | Command exceeded provided timeout (exit 124) |
+| `max-tries-exceeded` | Failed executions reached loop guard limit |
+| `sudo-auth-failed` | 3 incorrect sudo password attempts |
+| `no-alternative` | Auto-approve mode & failure produced no alternative |
+| `user-rejected` | User rejected initial command (interactive) |
+| `user-aborted` | User declined to modify after failure (interactive) |
+| `missing-analysis` | Internal state missing analysis before execution |
+| `missing-error-context` | Failure state missing error details |
+| `failure-analysis-error` | LLM failure analysis step failed |
+| `unexpected-error` | Unhandled runtime exception occurred |
+
+#### Tips
+- Combine `--yes --json` for CI pipelines.
+- Pipe to `jq` for assertions: `aish c "show date" -y --json | jq -r '.finalCommand'`.
+- Use `--max-tries 1` to fail fast for deterministic scripting.
+- In `--json` mode spinners and intermediate analysis/failure messages are suppressed (quiet output).
+
+#### JSON Mode Test Guidance
+Previously a helper script existed for deterministic JSON checks. That script has been removed. Use direct invocations combining `--yes`, `--json`, and optional `--max-tries` and validate the final line with `jq`.
+
+Example manual runs:
+```bash
+# Success path
+aish c "show current date" -y --json | jq .status
+
+# Invalid flag forcing correction (first fail then alternative)
+aish c "list files with an invalid flag to force correction" -y --json | jq '.attempts, .alternativesTried'
+
+# Max tries abort after single failure
+aish c "execute program named totally_fake_binary_xyz" -y --max-tries 1 --json | jq '.status, .abortedReason, .attempts'
+
+# Dangerous command blocked
+aish c "delete everything in root directory" -y --json | jq '.abortedReason'
+
+# Timeout test
+aish c "sleep for 5 seconds" -y --timeout 1 --json | jq '.abortedReason'
+```
+
+Key assertions to replicate manually:
+- Success path: `.status=="success" and .attempts==0`
+- Alternative correction: `.attempts==1 and .alternativesTried==1`
+- Max tries abort: `.abortedReason=="max-tries-exceeded"`
+- Dangerous command block: `.abortedReason=="dangerous-command" and .attempts==0`
+- Timeout abort: `.abortedReason=="timeout" and .attempts==1`
+
+CI tips:
+- Always parse the final line only: `tail -1` then `jq`.
+- Fail build if `jq -e '.success!=true'` for success scenarios.
+- Include negative tests asserting specific `abortedReason` values.
+- Keep runs provider/model stable to minimize variability (or rely on deterministic heuristics for trigger phrases: "show current date", "invalid flag to force correction", "totally_fake_binary_xyz", "multi_fail_cmd_that_does_not_exist", "delete everything in root directory", "read temperature from imaginary quantum co-processor").
 
 **Interactive Flow:**
 1. AI generates command(s) based on your description
@@ -117,81 +226,79 @@ aish c "docker ps" --model gpt-4o                  # Use specific model
 
 ---
 
-### ⚙️ `configure` - Setup AI Providers
+### ⚙️ `config` - Manage AI Providers
 
-Configure AI providers, models, and API keys with interactive or command-line interface.
+Manage providers, models, API keys, defaults, and updates. Supports both an interactive menu and explicit subcommands/flags for scripting.
 
 ```bash
-# Interactive configuration (recommended for first-time setup)
-aish configure
+# Interactive (first-time setup or management)
+aish config
 
-# Quick command-line setup
-aish configure --provider anthropic --model claude-3-5-sonnet-20241022 --api-key sk-...
-aish configure --provider openai --model gpt-4o --api-key sk-...
-aish configure --provider groq --model llama-3.1-70b-versatile --api-key gsk_...
-aish configure --provider ollama --model llama3.2 --base-url http://localhost:11434/api
+# Subcommand workflow (recommended for clarity)
+aish config add --provider anthropic --model claude-3-5-sonnet-20241022 --api-key sk-...
+aish config add --provider openai --model gpt-4o --api-key sk-...
+aish config add --provider groq --model llama-3.1-70b-versatile --api-key gsk_...
+aish config add --provider ollama --model llama3.2 --api-key dummy
 
-# Management commands
-aish configure --list                           # Show all configured providers
-aish configure --set-default anthropic         # Set default provider
-aish configure --update-model openai:gpt-4o    # Update model for existing provider
-aish configure --remove openai                 # Remove a provider
+# Show current configuration
+aish config show
+
+# Set default provider
+aish config default anthropic
+
+# Update model for existing provider
+aish config update openai:gpt-4o-mini
+
+# Remove a provider
+aish config remove groq
 ```
 
-**Command-Line Options:**
-- `--provider <provider>` - AI provider (anthropic, openai, xai, openrouter, groq, mistral, google, ollama)
-- `--model <model>` - Model name
-- `--api-key <key>` - API key for cloud providers
-- `--base-url <url>` - Base URL for local providers (e.g., Ollama)
-- `--update-model <provider:model>` - Update model for existing provider
-- `--set-default <provider>` - Set default provider
-- `--remove <provider>` - Remove provider
-- `--list` - Show all configured providers
+#### Script-Friendly Root Flags
+All management operations can also be scripted directly using flags on the root command (non-interactive):
+```bash
+# Add or update provider (idempotent)
+aish config --provider openai --model gpt-4o --api-key sk-...
 
-**Interactive Features:**
+# Update only the model
+aish config --update-model openai:gpt-4o-mini
+
+# Set default provider
+aish config --set-default openai
+
+# Remove a provider
+aish config --remove anthropic
+
+# List configured providers
+aish config --list
+```
+
+#### Options (subcommands & flags)
+- `--provider <provider>` AI provider (anthropic, openai, xai, openrouter, groq, mistral, google, ollama)
+- `--model <model>` Model name
+- `--api-key <key>` API key for cloud providers / local auth tokens
+- `--update-model <provider:model>` Update model for existing provider
+- `--set-default <provider>` Set default provider
+- `--remove <provider>` Remove provider
+- `--list` List configured providers
+
+#### Interactive Menu Capabilities
 - View current configuration
-- Add new providers with guided setup
-- Remove existing providers
+- Add new providers with guided setup (model & key prompts)
+- Remove providers with confirmation
 - Set default provider
-- Update models and API keys
+- Update model and optionally API key
 
----
-
-### 🔍 `configuration` - View Current Setup
-
-Display your current AI provider configuration.
-
-```bash
-aish configuration
-```
-
-**Output Example:**
+#### Configuration Output Example
 ```
 Current Configuration:
 ✓ [DEFAULT] anthropic
     Preferred Model: claude-3-5-sonnet-20241022
     API Key: sk-****-key
 
-  ollama
-    Preferred Model: llama3.2
-    Base URL: http://localhost:11434/api
-
   openai
     Preferred Model: gpt-4o
     API Key: sk-****-key
 ```
-
----
-
-### 🔄 `init` - Interactive Setup
-
-Alias for interactive configuration setup. Perfect for first-time users.
-
-```bash
-aish init
-```
-
-This is equivalent to `aish configure` and launches the interactive configuration menu.
 
 ---
 
@@ -302,13 +409,13 @@ Configuration is stored in `~/.config/aish/auth.json` with support for:
 ### Cloud Providers (API Key Required)
 ```bash
 # Anthropic Claude
-aish configure --provider anthropic --model claude-3-5-sonnet-20241022 --api-key sk-ant-...
+aish config --provider anthropic --model claude-3-5-sonnet-20241022 --api-key sk-ant-...
 
 # OpenAI GPT
-aish configure --provider openai --model gpt-4o --api-key sk-proj-...
+aish config --provider openai --model gpt-4o --api-key sk-proj-...
 
 # Groq (Fast & Free)
-aish configure --provider groq --model llama-3.1-70b-versatile --api-key gsk_...
+aish config --provider groq --model llama-3.1-70b-versatile --api-key gsk_...
 ```
 
 ### Local Providers (Self-Hosted)
@@ -319,10 +426,10 @@ ollama pull llama3.2
 ollama serve  # if not running as service
 
 # Configure AISH to use Ollama
-aish configure --provider ollama --model llama3.2 --base-url http://localhost:11434/api
+aish config --provider ollama --model llama3.2 --base-url http://localhost:11434/api
 
 # Custom Ollama URL (remote server)
-aish configure --provider ollama --model phi3 --base-url http://192.168.1.100:11434/api
+aish config --provider ollama --model phi3 --base-url http://192.168.1.100:11434/api
 ```
 
 ## 🛡️ Security Best Practices
@@ -384,7 +491,7 @@ src/
 ├── index.ts              # Main CLI entry point with all commands
 ├── commands/
 │   ├── command.ts        # AI-powered command generation and execution
-│   ├── configure.ts      # Interactive configuration management
+│   ├── configure.ts      # Interactive config command & flags
 │   ├── update.ts         # Self-update functionality
 │   ├── uninstall.ts      # Clean system removal
 ├── config/
@@ -492,7 +599,7 @@ git push origin v1.0.1
 **"No AI provider configured" Error:**
 ```bash
 # Solution: Configure a provider first
-aish configure --provider anthropic --model claude-3-5-sonnet-20241022 --api-key YOUR_KEY
+aish config --provider anthropic --model claude-3-5-sonnet-20241022 --api-key YOUR_KEY
 ```
 
 **"Command not found: aish" Error:**
@@ -508,10 +615,10 @@ source ~/.zshrc
 **API Key Issues:**
 ```bash
 # Check your configuration
-aish configuration
+aish config show
 
 # Update API key
-aish configure --provider anthropic --api-key NEW_KEY
+aish config --provider anthropic --api-key NEW_KEY
 
 # Test with a simple question
 aish ask "test" --provider anthropic

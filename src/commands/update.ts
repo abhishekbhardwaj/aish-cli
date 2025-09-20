@@ -5,6 +5,7 @@
 
 import chalk from "chalk";
 import { spawn } from "child_process";
+import { Command } from "commander";
 
 /**
  * Get current version (injected at build time)
@@ -117,6 +118,23 @@ export async function performSelfUpdate(): Promise<void> {
 /**
  * Handle update command
  */
+export function setupUpdateCommand(program: Command): void {
+  program
+    .command("update")
+    .description("Update AISH to the latest version")
+    .option("--check", "check for updates without installing")
+    .action(async (options) => {
+      try {
+        await handleUpdateCommand(options);
+      } catch (error) {
+        console.log(
+          `❌ Update failed: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
+        );
+        process.exit(1);
+      }
+    });
+}
+
 export async function handleUpdateCommand(options: {
   check?: boolean;
 }): Promise<void> {

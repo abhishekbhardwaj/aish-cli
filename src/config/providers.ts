@@ -6,7 +6,6 @@
  */
 
 import chalk from "chalk";
-import { isLocalProvider } from "../commands/configure";
 
 /**
  * Interface defining the structure of AI provider information
@@ -124,15 +123,6 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
     docsUrl:
       "https://ai-sdk.dev/providers/ai-sdk-providers/google-generative-ai#model-capabilities",
   },
-
-  /** Local Ollama models */
-  ollama: {
-    name: "Local Ollama",
-    models: ["deepseek-r1:1.5b", "gemma3:1b"],
-    docsUrl:
-      "https://ai-sdk.dev/providers/community-providers/ollama#model-capabilities",
-    modelsListUrl: "https://ollama.com/search",
-  },
 };
 
 /**
@@ -161,11 +151,7 @@ export function listProviders(): void {
     }
 
     // Provide example configuration command
-    const exampleCommand = isLocalProvider(key)
-      ? `aish configure --provider ${key} --model ${provider.models[0]} --base-url http://localhost:11434/api`
-      : `aish configure --provider ${key} --model ${provider.models[0]} --api-key YOUR_API_KEY`;
-    console.log(
-      `  ${chalk.bold("Example:")} ${chalk.gray(exampleCommand)}\n`,
-    );
+    const exampleCommand = `aish config --provider ${key} --model ${provider.models[0]} --api-key YOUR_API_KEY`;
+    console.log(`  ${chalk.bold("Example:")} ${chalk.gray(exampleCommand)}\n`);
   });
 }

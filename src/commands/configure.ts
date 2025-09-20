@@ -9,6 +9,7 @@
 import chalk from "chalk";
 import { select, input, confirm } from "@inquirer/prompts";
 import { ExitPromptError } from "@inquirer/core";
+import { Command } from "commander";
 import { PROVIDERS } from "../config/providers";
 import {
   loadConfig,
@@ -22,13 +23,6 @@ import {
 } from "../config/config";
 
 /**
- * Determines if a provider is a local provider that requires an API URL instead of API key
- */
-export function isLocalProvider(provider: string): boolean {
-  return provider === "ollama";
-}
-
-/**
  * Command-line options for the configure command
  */
 export interface ConfigureOptions {
@@ -38,8 +32,6 @@ export interface ConfigureOptions {
   model?: string;
   /** API key for authentication */
   apiKey?: string;
-  /** Base URL for local providers like Ollama */
-  baseUrl?: string;
   /** Update model for existing provider (format: provider:model) */
   updateModel?: string;
   /** Provider name to set as default */
@@ -61,6 +53,92 @@ export interface ConfigureOptions {
  *
  * @param options - Optional command-line options
  */
+export function setupConfigCommand(program: Command): void {
+  const configCmd = program
+    .command("config")
+    .description(
+      "Manage AI providers (interactive menu or script-friendly flags)",
+    )
+    // Script-friendly root flags (non-interactive usage)
+    .option("--provider <provider>", "AI provider name")
+    .option("--model <model>", "Model name")
+    .option("--api-key <key>", "API key")
+    .option(
+      "--update-model <provider:model>",
+      "Update model for provider (format: provider:model)",
+    )
+    .option("--set-default <provider>", "Set default provider")
+    .option("--remove <provider>", "Remove provider")
+    .option("--list", "List configured providers")
+    .action(async (options: any) => {
+      await configureCommand(options);
+    });
+
+  configCmd
+    .command("show")
+    .description("Show current configuration")
+    .action(() => {
+      const config = loadConfig();
+
+      if (config.providers.length === 0) {
+        console.log(
+          chalk.yellow(
+            "No configuration found. Run 'aish config' to get started.",
+          ),
+        );
+        return;
+      }
+
+      console.log(chalk.bold("Current Configuration:"));
+
+      config.providers.forEach((provider, index) => {
+        const isDefault = provider.provider === config.defaultProvider;
+        const prefix = isDefault ? chalk.green("✓ [DEFAULT]") : "  ";
+
+        console.log(`${prefix} ${chalk.bold(provider.provider)}`);
+        console.log(
+          `    Preferred Model: ${chalk.gray(provider.preferredModel)}`,
+        );
+        console.log(`    API Key: ${chalk.gray(maskApiKey(provider.apiKey))}`);
+
+        if (index < config.providers.length - 1) {
+          console.log("");
+        }
+      });
+    });
+
+  configCmd
+    .command("add")
+    .description("Add a new AI provider")
+    .option("--provider <provider>", "AI provider name")
+    .option("--model <model>", "Model name")
+    .option("--api-key <key>", "API key")
+    .action(async (options: any) => {
+      await configureCommand(options);
+    });
+
+  configCmd
+    .command("remove <provider>")
+    .description("Remove an AI provider")
+    .action(async (provider: string) => {
+      await configureCommand({ remove: provider });
+    });
+
+  configCmd
+    .command("default <provider>")
+    .description("Set default AI provider")
+    .action(async (provider: string) => {
+      await configureCommand({ setDefault: provider });
+    });
+
+  configCmd
+    .command("update <provider:model>")
+    .description("Update model for existing provider (format: provider:model)")
+    .action(async (updateModel: string) => {
+      await configureCommand({ updateModel });
+    });
+}
+
 export async function configureCommand(
   options?: ConfigureOptions,
 ): Promise<void> {
@@ -89,12 +167,7 @@ export async function configureCommand(
         return;
       }
 
-      if (
-        options.provider ||
-        options.model ||
-        options.apiKey ||
-        options.baseUrl
-      ) {
+      if (options.provider || options.model || options.apiKey) {
         await handleCliConfiguration(config, options);
         return;
       }
@@ -176,13 +249,7 @@ function showConfiguration(config: Config): void {
 
     console.log(`${prefix} ${chalk.bold(provider.provider)}`);
     console.log(`    Preferred Model: ${chalk.gray(provider.preferredModel)}`);
-    if (isLocalProvider(provider.provider)) {
-      console.log(
-        `    Base URL: ${chalk.gray(provider.baseUrl || "Not configured")}`,
-      );
-    } else {
-      console.log(`    API Key: ${chalk.gray(maskApiKey(provider.apiKey))}`);
-    }
+    console.log(`    API Key: ${chalk.gray(maskApiKey(provider.apiKey))}`);
 
     if (index < config.providers.length - 1) {
       console.log("");
@@ -242,59 +309,30 @@ async function addNewProvider(config: Config): Promise<void> {
     },
   });
 
-  // Get API key or API URL based on provider type
-  let apiKey: string;
-  if (isLocalProvider(selectedProvider)) {
-    console.log(
-      `\n🌐 You'll need to provide the base URL for ${provider.name}.`,
-    );
-    console.log(`   ${chalk.bold("Default URL:")} http://localhost:11434/api`);
-    console.log(
-      `   ${chalk.bold("Documentation:")} ${chalk.blue(provider.docsUrl)}`,
-    );
+  // Get API key
+  console.log(`\n🔑 You'll need an API key for ${provider.name}.`);
+  console.log(
+    `   ${chalk.bold("Get your API key:")} ${chalk.blue(provider.docsUrl)}`,
+  );
 
-    apiKey = await input({
-      message: "Enter your Local base URL:",
-      default: "http://localhost:11434/api",
-      validate: (input) => {
-        if (!input.trim()) {
-          return "Base URL is required";
-        }
-        try {
-          new URL(input);
-          return true;
-        } catch {
-          return "Please enter a valid URL (e.g., http://localhost:11434/api)";
-        }
-      },
-    });
-  } else {
-    console.log(`\n🔑 You'll need an API key for ${provider.name}.`);
-    console.log(
-      `   ${chalk.bold("Get your API key:")} ${chalk.blue(provider.docsUrl)}`,
-    );
-
-    apiKey = await input({
-      message: "Enter your API key:",
-      validate: (input) => {
-        if (!input.trim()) {
-          return "API key is required";
-        }
-        if (input.length < 10) {
-          return "API key seems too short. Please check and try again.";
-        }
-        return true;
-      },
-    });
-  }
+  const apiKey = await input({
+    message: "Enter your API key:",
+    validate: (input) => {
+      if (!input.trim()) {
+        return "API key is required";
+      }
+      if (input.length < 10) {
+        return "API key seems too short. Please check and try again.";
+      }
+      return true;
+    },
+  });
 
   // Create and save provider configuration
   const providerConfig: ProviderConfig = {
     provider: selectedProvider,
     preferredModel: selectedModel.trim(),
-    ...(isLocalProvider(selectedProvider)
-      ? { baseUrl: apiKey.trim() }
-      : { apiKey: apiKey.trim() }),
+    apiKey: apiKey.trim(),
   };
 
   addProvider(config, providerConfig);
@@ -304,13 +342,7 @@ async function addNewProvider(config: Config): Promise<void> {
   console.log(chalk.green("\n✅ Provider added successfully!"));
   console.log(`   ${chalk.bold("Provider:")} ${chalk.gray(provider.name)}`);
   console.log(`   ${chalk.bold("Model:")} ${chalk.gray(selectedModel)}`);
-  if (isLocalProvider(selectedProvider)) {
-    console.log(`   ${chalk.bold("Base URL:")} ${chalk.gray(apiKey)}`);
-  } else {
-    console.log(
-      `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`,
-    );
-  }
+  console.log(`   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`);
 
   // Show usage hint for first provider
   if (config.providers.length === 1) {
@@ -447,54 +479,33 @@ async function updateProviderInteractive(config: Config): Promise<void> {
     },
   });
 
-  // Optionally update API key or base URL
-  const isLocal = isLocalProvider(providerToUpdate);
+  // Optionally update API key
   const updateApiKey = await confirm({
-    message: `Do you want to update the ${isLocal ? "base URL" : "API key"}?`,
+    message: "Do you want to update the API key?",
     default: false,
   });
 
-  let apiKey = isLocal ? existingProvider.baseUrl : existingProvider.apiKey;
+  let apiKey = existingProvider.apiKey;
   if (updateApiKey) {
-    if (isLocal) {
-      apiKey = await input({
-        message: "Enter your new Local base URL:",
-        default: existingProvider.baseUrl || "http://localhost:11434/api",
-        validate: (input) => {
-          if (!input.trim()) {
-            return "Base URL is required";
-          }
-          try {
-            new URL(input);
-            return true;
-          } catch {
-            return "Please enter a valid URL (e.g., http://localhost:11434/api)";
-          }
-        },
-      });
-    } else {
-      apiKey = await input({
-        message: "Enter your new API key:",
-        validate: (input) => {
-          if (!input.trim()) {
-            return "API key is required";
-          }
-          if (input.length < 10) {
-            return "API key seems too short. Please check and try again.";
-          }
-          return true;
-        },
-      });
-    }
+    apiKey = await input({
+      message: "Enter your new API key:",
+      validate: (input) => {
+        if (!input.trim()) {
+          return "API key is required";
+        }
+        if (input.length < 10) {
+          return "API key seems too short. Please check and try again.";
+        }
+        return true;
+      },
+    });
   }
 
   // Save updated configuration
   const updatedProvider: ProviderConfig = {
     provider: providerToUpdate,
     preferredModel: selectedModel.trim(),
-    ...(isLocal
-      ? { baseUrl: apiKey?.trim(), apiKey: existingProvider.apiKey }
-      : { apiKey: apiKey?.trim(), baseUrl: existingProvider.baseUrl }),
+    apiKey: apiKey?.trim() || existingProvider.apiKey,
   };
 
   addProvider(config, updatedProvider);
@@ -504,13 +515,9 @@ async function updateProviderInteractive(config: Config): Promise<void> {
   console.log(`   ${chalk.bold("Provider:")} ${chalk.gray(provider.name)}`);
   console.log(`   ${chalk.bold("Model:")} ${chalk.gray(selectedModel)}`);
   if (updateApiKey) {
-    if (isLocalProvider(providerToUpdate)) {
-      console.log(`   ${chalk.bold("Base URL:")} ${chalk.gray(apiKey)}`);
-    } else {
-      console.log(
-        `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`,
-      );
-    }
+    console.log(
+      `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(apiKey))}`,
+    );
   }
 }
 
@@ -551,34 +558,10 @@ async function handleCliConfiguration(
     return;
   }
 
-  const isLocal = isLocalProvider(options.provider);
-
   // Validate required authentication field for new providers
-  if (!existingProvider) {
-    if (isLocal && !options.baseUrl) {
-      console.log(
-        chalk.red("❌ --base-url is required when adding Local provider"),
-      );
-      return;
-    }
-    if (!isLocal && !options.apiKey) {
-      console.log(
-        chalk.red("❌ --api-key is required when adding cloud providers"),
-      );
-      return;
-    }
-  }
-
-  // Validate that the correct option is used for the provider type
-  if (isLocal && options.apiKey && !options.baseUrl) {
+  if (!existingProvider && !options.apiKey) {
     console.log(
-      chalk.red("❌ Use --base-url instead of --api-key for Local provider"),
-    );
-    return;
-  }
-  if (!isLocal && options.baseUrl && !options.apiKey) {
-    console.log(
-      chalk.red("❌ Use --api-key instead of --base-url for cloud providers"),
+      chalk.red("❌ --api-key is required when adding a new provider"),
     );
     return;
   }
@@ -587,9 +570,7 @@ async function handleCliConfiguration(
   const providerConfig: ProviderConfig = {
     provider: options.provider,
     preferredModel: options.model || existingProvider?.preferredModel || "",
-    ...(isLocal
-      ? { baseUrl: options.baseUrl || existingProvider?.baseUrl || "" }
-      : { apiKey: options.apiKey || existingProvider?.apiKey || "" }),
+    apiKey: options.apiKey || existingProvider?.apiKey || "",
   };
 
   // Final validation
@@ -598,28 +579,9 @@ async function handleCliConfiguration(
     return;
   }
 
-  // Validate required authentication field
-  if (isLocal) {
-    if (!providerConfig.baseUrl) {
-      console.log(chalk.red("❌ Base URL is required"));
-      return;
-    }
-    // Validate base URL format
-    try {
-      new URL(providerConfig.baseUrl);
-    } catch {
-      console.log(
-        chalk.red(
-          "❌ Invalid base URL format. Please provide a valid URL (e.g., http://localhost:11434/api)",
-        ),
-      );
-      return;
-    }
-  } else {
-    if (!providerConfig.apiKey) {
-      console.log(chalk.red("❌ API key is required"));
-      return;
-    }
+  if (!providerConfig.apiKey) {
+    console.log(chalk.red("❌ API key is required"));
+    return;
   }
 
   // Save configuration
@@ -634,15 +596,9 @@ async function handleCliConfiguration(
   console.log(
     `   ${chalk.bold("Preferred Model:")} ${chalk.gray(providerConfig.preferredModel)}`,
   );
-  if (isLocal) {
-    console.log(
-      `   ${chalk.bold("Base URL:")} ${chalk.gray(providerConfig.baseUrl)}`,
-    );
-  } else {
-    console.log(
-      `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(providerConfig.apiKey))}`,
-    );
-  }
+  console.log(
+    `   ${chalk.bold("API Key:")} ${chalk.gray(maskApiKey(providerConfig.apiKey))}`,
+  );
 }
 
 /**

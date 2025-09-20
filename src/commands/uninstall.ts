@@ -8,6 +8,7 @@ import { confirm } from "@inquirer/prompts";
 import { existsSync, unlinkSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { Command } from "commander";
 
 /**
  * Get the current binary path
@@ -66,6 +67,24 @@ function getRemovalItems(): {
 /**
  * Handle uninstall command
  */
+export function setupUninstallCommand(program: Command): void {
+  program
+    .command("uninstall")
+    .description("Uninstall AISH from your system")
+    .option("--force", "skip confirmation prompt")
+    .option("--config-only", "only remove configuration files, keep binary")
+    .action(async (options) => {
+      try {
+        await handleUninstallCommand(options);
+      } catch (error) {
+        console.log(
+          `❌ Uninstall failed: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
+        );
+        process.exit(1);
+      }
+    });
+}
+
 export async function handleUninstallCommand(options: {
   force?: boolean;
   configOnly?: boolean;
@@ -77,7 +96,7 @@ export async function handleUninstallCommand(options: {
 
   // Show what will be removed
   console.log(chalk.blue("\n📋 Items to be removed:"));
-  
+
   if (!options.configOnly && items.binary) {
     console.log(chalk.yellow(`  • Binary: ${items.binary}`));
   } else if (!options.configOnly) {
@@ -95,10 +114,8 @@ export async function handleUninstallCommand(options: {
   }
 
   // Check if there's nothing to remove
-  const hasItemsToRemove = 
-    (!options.configOnly && items.binary) || 
-    items.config || 
-    items.legacyConfig;
+  const hasItemsToRemove =
+    (!options.configOnly && items.binary) || items.config || items.legacyConfig;
 
   if (!hasItemsToRemove) {
     console.log(chalk.green("\n✅ AISH is not installed or already removed."));
@@ -108,7 +125,7 @@ export async function handleUninstallCommand(options: {
   // Confirm removal unless --force is used
   if (!options.force) {
     console.log(chalk.red("\n⚠️  This action cannot be undone!"));
-    
+
     const shouldProceed = await confirm({
       message: "Are you sure you want to uninstall AISH?",
       default: false,
@@ -131,7 +148,11 @@ export async function handleUninstallCommand(options: {
       console.log(chalk.green(`  ✅ Removed binary: ${items.binary}`));
       removedItems++;
     } catch (error) {
-      console.log(chalk.red(`  ❌ Failed to remove binary: ${error instanceof Error ? error.message : "Unknown error"}`));
+      console.log(
+        chalk.red(
+          `  ❌ Failed to remove binary: ${error instanceof Error ? error.message : "Unknown error"}`,
+        ),
+      );
     }
   }
 
@@ -143,7 +164,11 @@ export async function handleUninstallCommand(options: {
       console.log(chalk.green(`  ✅ Removed configuration: ${items.config}`));
       removedItems++;
     } catch (error) {
-      console.log(chalk.red(`  ❌ Failed to remove configuration: ${error instanceof Error ? error.message : "Unknown error"}`));
+      console.log(
+        chalk.red(
+          `  ❌ Failed to remove configuration: ${error instanceof Error ? error.message : "Unknown error"}`,
+        ),
+      );
     }
   }
 
@@ -151,25 +176,41 @@ export async function handleUninstallCommand(options: {
   if (items.legacyConfig) {
     try {
       unlinkSync(items.legacyConfig);
-      console.log(chalk.green(`  ✅ Removed legacy config: ${items.legacyConfig}`));
+      console.log(
+        chalk.green(`  ✅ Removed legacy config: ${items.legacyConfig}`),
+      );
       removedItems++;
     } catch (error) {
-      console.log(chalk.red(`  ❌ Failed to remove legacy config: ${error instanceof Error ? error.message : "Unknown error"}`));
+      console.log(
+        chalk.red(
+          `  ❌ Failed to remove legacy config: ${error instanceof Error ? error.message : "Unknown error"}`,
+        ),
+      );
     }
   }
 
   // Final message
   if (removedItems > 0) {
-    console.log(chalk.green(`\n🎉 Successfully removed ${removedItems} item(s)!`));
-    
+    console.log(
+      chalk.green(`\n🎉 Successfully removed ${removedItems} item(s)!`),
+    );
+
     if (!options.configOnly) {
       console.log(chalk.blue("\n📝 Manual cleanup (if needed):"));
-      console.log(chalk.gray("  • Remove any PATH exports from your shell config files"));
-      console.log(chalk.gray("  • Restart your terminal or run: source ~/.zshrc (or ~/.bashrc)"));
+      console.log(
+        chalk.gray("  • Remove any PATH exports from your shell config files"),
+      );
+      console.log(
+        chalk.gray(
+          "  • Restart your terminal or run: source ~/.zshrc (or ~/.bashrc)",
+        ),
+      );
     }
-    
+
     console.log(chalk.yellow("\n👋 Thanks for using AISH!"));
   } else {
-    console.log(chalk.red("\n❌ No items were removed. Please check permissions."));
+    console.log(
+      chalk.red("\n❌ No items were removed. Please check permissions."),
+    );
   }
 }

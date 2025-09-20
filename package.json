@@ -16,6 +16,8 @@
     "build:windows": "bun build --compile --minify --target=bun-windows-x64 --define AISH_VERSION='\"$npm_package_version\"' src/index.ts --outfile dist/aish-windows-x64.exe",
     "dev": "AISH_VERSION=$npm_package_version bun run src/index.ts",
     "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "update-all-dependencies": "bunx taze major -r -w",
     "release": "bun run build:all",
     "prepare": "husky"
   },
@@ -67,19 +69,18 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^1.2.12",
-    "@ai-sdk/google": "^1.2.22",
-    "@ai-sdk/groq": "^1.2.9",
-    "@ai-sdk/mistral": "^1.2.8",
-    "@ai-sdk/openai": "^1.3.23",
-    "@ai-sdk/xai": "^1.2.18",
-    "@inquirer/prompts": "^7.7.1",
-    "@openrouter/ai-sdk-provider": "^0.7.3",
-    "ai": "^4.3.19",
+    "@ai-sdk/anthropic": "^2.0.17",
+    "@ai-sdk/google": "^2.0.14",
+    "@ai-sdk/groq": "^2.0.20",
+    "@ai-sdk/mistral": "^2.0.14",
+    "@ai-sdk/openai": "^2.0.32",
+    "@ai-sdk/xai": "^2.0.20",
+    "@inquirer/prompts": "^7.8.6",
+    "@openrouter/ai-sdk-provider": "^1.2.0",
+    "ai": "^5.0.47",
     "ai-json-fixer": "^0.2.0",
-    "chalk": "^5.4.1",
-    "commander": "^14.0.0",
-    "ollama-ai-provider": "^1.2.0",
-    "zod": "^4.0.10"
+    "chalk": "^5.6.2",
+    "commander": "^14.0.1",
+    "zod": "^4.1.9"
   }
 }

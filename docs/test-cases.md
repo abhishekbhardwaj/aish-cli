@@ -19,7 +19,7 @@ This document provides an exhaustive list of test cases for AISH (AI Shell Assis
 ```bash
 # Test 1: First time setup with no config
 rm -rf ~/.config/aish
-./aish init
+./aish config
 # Expected: Interactive setup wizard
 
 # Test 2: Running commands without configuration
@@ -35,62 +35,61 @@ rm -rf ~/.config/aish
 ./aish --help
 ./aish ask --help
 ./aish command --help
-./aish configure --help
+./aish config --help
 # Expected: Shows appropriate help text
 ```
 
 ## Configuration Tests
 
+Note: Configuration primarily uses the `aish config` command with explicit subcommands (`show`, `add`, `remove`, `default`, `update`). Script-friendly root flags (e.g. `aish config --provider openai --model gpt-4 --api-key sk...`) remain supported for non-interactive usage and CI pipelines.
+
 ### Basic Configuration
 ```bash
-# Test 5: Configure with CLI flags
-./aish configure --provider openai --api-key sk-test123 --model gpt-4
-# Expected: Success message
+# Test 5: Add provider (OpenAI)
+./aish config add --provider openai --api-key sk-test123 --model gpt-4
+# Expected: Provider added
 
-# Test 6: Configure with interactive mode
-./aish configure
-# Expected: Interactive prompts for provider, model, API key
+# Test 6: Interactive config menu
+./aish config
+# Expected: Interactive menu to add/view providers
 
-# Test 7: List configurations
-./aish configure --list
-./aish configuration
+# Test 7: Show configurations
+./aish config show
 # Expected: Shows all configured providers with masked API keys
 
-# Test 8: Configure multiple providers
-./aish configure --provider anthropic --api-key sk-ant-test --model claude-3-opus-20240229
-./aish configure --provider groq --api-key gsk_test --model llama-3.1-70b-versatile
-./aish configure --list
+# Test 8: Add multiple providers
+./aish config add --provider anthropic --api-key sk-ant-test --model claude-3-opus-20240229
+./aish config add --provider groq --api-key gsk_test --model llama-3.1-70b-versatile
+./aish config show
 # Expected: Shows all three providers
 
 # Test 9: Set default provider
-./aish configure --set-default groq
-./aish configuration
+./aish config default groq
+./aish config show
 # Expected: Shows groq as default with checkmark
 
 # Test 10: Update model for existing provider
-./aish configure --update-model openai:gpt-3.5-turbo
-./aish configuration
+./aish config update openai:gpt-3.5-turbo
+./aish config show
 # Expected: OpenAI provider now uses gpt-3.5-turbo
 
 # Test 11: Remove provider
-./aish configure --remove groq
-./aish configuration
+./aish config remove groq
+./aish config show
 # Expected: Groq provider removed from list
 
-# Test 12: Configure local provider (Ollama)
-./aish configure --provider ollama --base-url http://localhost:11434 --model llama2
-# Expected: Success, no API key required
+# (Test slot intentionally left open for future provider-specific validations)
 
 # Test 13: Invalid provider
-./aish configure --provider invalid-provider --api-key test
+./aish config add --provider invalid-provider --api-key test --model bogus
 # Expected: Error about invalid provider
 
 # Test 14: Missing required fields
-./aish configure --provider openai
-# Expected: Error about missing API key
+./aish config add --provider openai
+# Expected: Error about missing model/api key
 
 # Test 15: Update non-existent provider
-./aish configure --update-model nonexistent:model
+./aish config update nonexistent:model
 # Expected: Error about provider not found
 ```
 
@@ -292,7 +291,7 @@ rm -rf ~/.config/aish
 # Test 56: Sudo with wrong password (3 attempts)
 ./aish c "list root directory with sudo"
 # Enter wrong password 3 times
-# Expected: 
+# Expected:
 # - 1st attempt: "Enter sudo password:"
 # - 2nd attempt: "Enter sudo password (retry):"
 # - 3rd attempt: "Enter sudo password (retry):"
@@ -441,7 +440,7 @@ chmod 755 $(which aish)
 # Expected: Network error message
 
 # Test 84: API request with invalid API key
-./aish configure --provider openai --api-key invalid-key --model gpt-4
+./aish config add --provider openai --api-key invalid-key --model gpt-4
 ./aish ask "hello"
 # Expected: Authentication error
 
@@ -460,13 +459,13 @@ for i in {1..50}; do ./aish ask "hi" & done
 ```bash
 # Test 87: Config directory not writable
 chmod 000 ~/.config/aish
-./aish configure --provider openai --api-key test --model gpt-4
+./aish config add --provider openai --api-key test --model gpt-4
 # Expected: Permission error
 chmod 755 ~/.config/aish
 
 # Test 88: Config file corrupted
-echo "invalid json {" > ~/.config/aish/config.json
-./aish configuration
+echo "invalid json {" > ~/.config/aish/auth.json
+./aish config show
 # Expected: Error about invalid config, suggestion to reconfigure
 
 # Test 89: Binary not executable
@@ -494,7 +493,7 @@ chmod 755 ./aish
 # Expected: Error about missing arguments
 
 # Test 93: Invalid provider in config
-echo '{"providers":[{"provider":"invalid","apiKey":"test"}]}' > ~/.config/aish/config.json
+echo '{"providers":[{"provider":"invalid","apiKey":"test"}]}' > ~/.config/aish/auth.json
 ./aish ask "hello"
 # Expected: Error about invalid provider
 ```
@@ -681,6 +680,112 @@ env -i ./aish ask "hello"
 # Expected: Handles glob expansion
 ```
 
+## Auto-Approve / JSON Mode / Loop Guard Tests
+
+These tests validate the new non-interactive execution flags: `-y/--yes`, `--max-tries`, and `--json`, plus the loop guard and structured summary fields.
+
+### Behavior Overview
+- `-y/--yes`: Skips interactive approval/refinement prompts (still prompts for sudo password if needed)
+- `--max-tries <n>`: Aborts after N failed executions (counts only failed command executions, not successful ones or analysis passes)
+- `--json`: Quiet mode: suppresses spinners & analysis/failure chatter; streams only command stdout/stderr plus final single-line JSON summary.
+- Attempts counter: Equals number of failed executions (each non‑zero exit). Successful final run does not increment.
+- Alternative attempts: Counted when a failure analysis produces an `alternativeCommand` that is then executed.
+
+### Added JSON Fields
+- `status`: one of `success | aborted`
+- `success`: boolean (mirrors status)
+- `abortedReason`: string when aborted (omitted if success)
+- `attempts`: number of failed executions
+- `failures[]`: details per failed execution (stdout/stderr, explanation, solution, alternativeCommand)
+- `alternativesTried`: count of failures that yielded an alternative command
+
+### Aborted Reasons Reference
+| Reason | Meaning |
+|--------|---------|
+| dangerous-command | Model flagged command as destructive; never executed |
+| timeout | Command exceeded provided timeout (exit 124) |
+| max-tries-exceeded | Failed executions reached `--max-tries` limit |
+| sudo-auth-failed | 3 incorrect sudo password attempts |
+| no-alternative | Auto-approve mode with failure that produced no alternative |
+| user-rejected | User explicitly rejected initial command (interactive) |
+| user-aborted | User declined to modify after a failure (interactive) |
+| missing-analysis | Internal state missing analysis before execution |
+| missing-error-context | Failure state missing error details |
+| failure-analysis-error | LLM failure analysis step errored |
+| unexpected-error | Unhandled runtime exception occurred |
+
+### Attempt Counting Rules
+1. Incremented only immediately after a command exits with non-zero status.
+2. Sudo password failures count as failed attempts (each incorrect password execution).
+3. Timeouts count as a failed attempt then abort with `timeout`.
+4. Dangerous command detection aborts BEFORE execution (attempts remains 0).
+
+```bash
+# Test 126: Auto-approve success path
+./aish c "show current date" -y --json
+# Expected: status=success, no abortedReason field, attempts=0
+
+# Test 127: Alternative correction success
+# The model should generate a command that fails, then suggest a correction.
+# Example prompt that may work: "list files with a made-up flag"
+./aish c "list files with a flag that doesn't exist" -y --json
+# Expected: First attempt fails, alternative succeeds
+# JSON: status=success, attempts=1, alternativesTried=1 (values may vary)
+
+# Test 128: Max tries abort
+# The model should generate a command that is likely to fail repeatedly.
+./aish c "execute a command that is not installed" -y --max-tries 1 --json
+# Expected: status=aborted, abortedReason=max-tries-exceeded, attempts=1
+
+# Test 129: Timeout abort
+./aish c "sleep for 5 seconds" -y --timeout 1 --json
+# Expected: status=aborted, abortedReason=timeout, attempts=1
+
+# Test 130: Dangerous command blocked
+./aish c "delete everything in root directory" -y --json
+# Expected: status=aborted, abortedReason=dangerous-command, attempts=0
+
+# Test 131: Sudo authentication failure (enter wrong password 3 times)
+./aish c "list root directory with sudo" -y --json
+# Expected: status=aborted, abortedReason=sudo-auth-failed, attempts=3
+
+# Test 132: No alternative in auto-approve
+# Try to craft a request likely to yield no viable alternative after failure.
+./aish c "interact with a non-existent hardware device" -y --max-tries 1 --json
+# Expected (if model returns no alternative): status=aborted, abortedReason=no-alternative, attempts=1
+# NOTE: Model may still suggest an echo or different safe command, making this test probabilistic.
+
+# Test 133: JSON fields presence & parsing
+./aish c "show current date" -y --json | jq .status
+./aish c "list files with an invalid flag to force correction" -y --json | jq '.attempts, .alternativesTried'
+# Expected: jq extracts correct fields; no abortedReason on success
+
+# Test 134: Attempts count excludes success run
+./aish c "list files with an invalid flag to force correction" -y --json | jq '.attempts'
+# Expected: 1 (only the failing first command), not 2.
+
+# Test 135: Multiple failures until limit
+# The model should generate a command that is likely to fail repeatedly.
+./aish c "run a command that will fail multiple times" -y --max-tries 2 --json
+# Expected: status=aborted after 2 failed attempts, attempts=2
+
+# Test 136: Combined flags for scripting
+./aish c "show disk usage" -y --max-tries 2 --json | tee result.json
+# Expected: result.json contains single-line JSON summary
+
+# Test 137: Interactive rejection still works (no -y)
+./aish c "show current date"
+# Press 'n' then Enter
+# Expected: status=aborted, abortedReason=user-rejected (if rerun with --json)
+
+# Test 138: Interactive modify path
+./aish c "list files"
+# At prompt type: show hidden files too
+# Expected: refined command (ls -la), still counts only failed executions if any occur
+```
+
+> NOTE: JSON mode tests are subject to model variability. The `Expected` fields describe the target behavior, but actual commands and alternative counts may differ between runs. For consistent CI, use a fixed model version and provider.
+
 ## Cleanup
 
 ```bash
@@ -688,7 +793,7 @@ env -i ./aish ask "hello"
 rm -f output.txt test.sh test-pwd.sh
 rm -f /tmp/test.txt /tmp/protected.txt /tmp/proc.txt
 # Reset configuration if needed
-# ./aish configure
+# ./aish config
 ```
 
 ## Test Execution Guidelines

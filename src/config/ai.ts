@@ -13,19 +13,22 @@ import { createMistral } from "@ai-sdk/mistral";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { createOllama } from "ollama-ai-provider";
 
 import {
   generateText,
   generateObject,
   streamText,
   type LanguageModel,
-  type CoreMessage,
+  type ModelMessage,
+  APICallError,
 } from "ai";
 import { z } from "zod";
 import { LLMJSONParser } from "ai-json-fixer";
-import type { ProviderConfig } from "./config";
-import { isLocalProvider } from "../commands/configure";
+import {
+  getDefaultProvider,
+  type loadConfig,
+  type ProviderConfig,
+} from "./config";
 
 /**
  * Factory function for creating Anthropic provider
@@ -84,14 +87,6 @@ export const createAiSdkOpenRouter = (apiKey: string) =>
   });
 
 /**
- * Factory function for creating Ollama provider
- */
-export const createAiSdkOllama = (baseURL: string) =>
-  createOllama({
-    baseURL,
-  });
-
-/**
  * Supported AI providers
  */
 export type SupportedProvider =
@@ -101,8 +96,7 @@ export type SupportedProvider =
   | "mistral"
   | "google"
   | "groq"
-  | "openrouter"
-  | "ollama";
+  | "openrouter";
 
 /**
  * Provider factory map for type safety
@@ -115,7 +109,6 @@ const PROVIDER_FACTORIES = {
   google: createAiSdkGoogle,
   groq: createAiSdkGroq,
   openrouter: createAiSdkOpenRouter,
-  ollama: createAiSdkOllama,
 } as const;
 
 /**
@@ -129,57 +122,6 @@ export class AIServiceError extends Error {
     super(message);
     this.name = "AIServiceError";
   }
-}
-
-/**
- * Extracts human-readable error message from AI SDK errors
- */
-function extractAIError(error: unknown): string {
-  // Handle wrapped error objects (from onError callback)
-  if (error && typeof error === "object" && "error" in error) {
-    const wrappedError = (error as any).error;
-    return extractAIError(wrappedError);
-  }
-
-  // Check if it's an AI SDK error with detailed information
-  if (
-    error &&
-    typeof error === "object" &&
-    "statusCode" in error &&
-    "data" in error
-  ) {
-    const aiError = error as any;
-
-    // Try to get the specific error message from the response
-    if (aiError.data?.error?.message) {
-      return aiError.data.error.message;
-    }
-
-    // Handle common HTTP status codes
-    switch (aiError.statusCode) {
-      case 401:
-        return "Invalid API key. Please check your API key configuration.";
-      case 403:
-        return "Access forbidden. Please check your API key permissions.";
-      case 429:
-        return "Rate limit exceeded. Please try again later.";
-      case 404:
-        return "Model not found. Please check the model name.";
-      case 500:
-        return "AI service error. Please try again later.";
-      default:
-        if (aiError.message) {
-          return aiError.message;
-        }
-    }
-  }
-
-  // Fallback to the error message if available
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return "Unknown error occurred";
 }
 
 export class UnsupportedProviderError extends AIServiceError {
@@ -197,14 +139,59 @@ export class ModelCreationError extends AIServiceError {
 }
 
 /**
+ * Extracts human-readable error message from AI SDK errors
+ */
+function extractAIError(error: unknown): string {
+  // Handle wrapped error objects (from onError callback)
+  if (error && typeof error === "object" && "error" in error) {
+    const wrappedError = (error as { error: unknown }).error;
+    return extractAIError(wrappedError);
+  }
+
+  // Check if it's an AI SDK APICallError
+  if (APICallError.isInstance(error)) {
+    // Try to get the specific error message from the response data
+    if (error.data && typeof error.data === "object" && "error" in error.data) {
+      const errorData = error.data as { error?: { message?: string } };
+      if (errorData.error?.message) {
+        return errorData.error.message;
+      }
+    }
+
+    // Handle common HTTP status codes
+    switch (error.statusCode) {
+      case 401:
+        return "Invalid API key. Please check your API key configuration.";
+      case 403:
+        return "Access forbidden. Please check your API key permissions.";
+      case 429:
+        return "Rate limit exceeded. Please try again later.";
+      case 404:
+        return "Model not found. Please check the model name.";
+      case 500:
+        return "AI service error. Please try again later.";
+      default:
+        return error.message || "API call failed";
+    }
+  }
+
+  // Fallback to the error message if available
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return "Unknown error occurred";
+}
+
+/**
  * Options for text generation
  */
 export interface GenerateTextOptions {
   system?: string;
   prompt?: string;
-  messages?: CoreMessage[];
+  messages?: ModelMessage[];
   temperature?: number;
-  maxTokens?: number;
+  maxOutputTokens?: number;
 }
 
 /**
@@ -236,30 +223,25 @@ export function createModel(config: ProviderConfig): LanguageModel {
   }
 
   try {
-    if (isLocalProvider(provider)) {
-      if (!config.baseUrl) throw new Error(`Base URL is required for ${provider}`);
-      return createAiSdkOllama(config.baseUrl)(config.preferredModel);
-    } else {
-      if (!config.apiKey) throw new Error(`API key is required for ${provider}`);
-      
-      switch (provider) {
-        case "anthropic":
-          return createAiSdkAnthropic(config.apiKey)(config.preferredModel);
-        case "openai":
-          return createAiSdkOpenAI(config.apiKey)(config.preferredModel);
-        case "xai":
-          return createAiSdkXai(config.apiKey)(config.preferredModel);
-        case "mistral":
-          return createAiSdkMistral(config.apiKey)(config.preferredModel);
-        case "google":
-          return createAiSdkGoogle(config.apiKey)(config.preferredModel);
-        case "groq":
-          return createAiSdkGroq(config.apiKey)(config.preferredModel);
-        case "openrouter":
-          return createAiSdkOpenRouter(config.apiKey)(config.preferredModel);
-        default:
-          throw new UnsupportedProviderError(provider);
-      }
+    if (!config.apiKey) throw new Error(`API key is required for ${provider}`);
+
+    switch (provider) {
+      case "anthropic":
+        return createAiSdkAnthropic(config.apiKey)(config.preferredModel);
+      case "openai":
+        return createAiSdkOpenAI(config.apiKey)(config.preferredModel);
+      case "xai":
+        return createAiSdkXai(config.apiKey)(config.preferredModel);
+      case "mistral":
+        return createAiSdkMistral(config.apiKey)(config.preferredModel);
+      case "google":
+        return createAiSdkGoogle(config.apiKey)(config.preferredModel);
+      case "groq":
+        return createAiSdkGroq(config.apiKey)(config.preferredModel);
+      case "openrouter":
+        return createAiSdkOpenRouter(config.apiKey)(config.preferredModel);
+      default:
+        throw new UnsupportedProviderError(provider);
     }
   } catch (error) {
     throw new ModelCreationError(provider, error);
@@ -281,14 +263,18 @@ export async function generateAIText(
   options: GenerateTextOptions,
 ): Promise<string> {
   try {
-    const result = await generateText({
+    type GenerateTextParams = Parameters<typeof generateText>[0];
+    const params: GenerateTextParams = {
       model,
       system: options.system,
-      prompt: options.prompt,
-      messages: options.messages,
       temperature: options.temperature,
-      maxTokens: options.maxTokens,
-    });
+      maxOutputTokens: options.maxOutputTokens,
+      ...(options.messages
+        ? { messages: options.messages }
+        : { prompt: options.prompt || "" }),
+    };
+
+    const result = await generateText(params);
     return result.text;
   } catch (error) {
     const errorMessage = extractAIError(error);
@@ -306,26 +292,32 @@ export async function streamAIText(
   onStreamError?: (error: unknown) => void,
 ): Promise<void> {
   try {
-    const result = streamText({
+    const onErrorHandler = (event: { error: unknown }) => {
+      // Stop spinner immediately when error occurs
+      if (onFirstChunk) {
+        onFirstChunk();
+      }
+      if (onStreamError) {
+        onStreamError(event.error);
+      }
+      // Extract and throw the error with proper message
+      const errorMessage = extractAIError(event.error);
+      throw new AIServiceError(errorMessage, event.error);
+    };
+
+    type StreamTextParams = Parameters<typeof streamText>[0];
+    const params: StreamTextParams = {
       model,
       system: options.system,
-      prompt: options.prompt,
-      messages: options.messages,
       temperature: options.temperature,
-      maxTokens: options.maxTokens,
-      onError: (error) => {
-        // Stop spinner immediately when error occurs
-        if (onFirstChunk) {
-          onFirstChunk();
-        }
-        if (onStreamError) {
-          onStreamError(error);
-        }
-        // Extract and throw the error with proper message
-        const errorMessage = extractAIError(error);
-        throw new AIServiceError(errorMessage, error);
-      },
-    });
+      maxOutputTokens: options.maxOutputTokens,
+      onError: onErrorHandler,
+      ...(options.messages
+        ? { messages: options.messages }
+        : { prompt: options.prompt || "" }),
+    };
+
+    const result = streamText(params);
 
     let isFirstChunk = true;
     for await (const textPart of result.textStream) {
@@ -421,14 +413,19 @@ export async function generateAIObject<T>(
   options: GenerateTextOptions,
 ): Promise<T> {
   try {
-    const result = await generateObject({
+    type GenerateObjectParams = Parameters<typeof generateObject>[0];
+    const params: GenerateObjectParams = {
       model,
       schema,
       system: options.system,
-      prompt: options.prompt,
       temperature: options.temperature,
-      maxTokens: options.maxTokens,
-    });
+      maxOutputTokens: options.maxOutputTokens,
+      ...(options.messages
+        ? { messages: options.messages }
+        : { prompt: options.prompt || "" }),
+    };
+
+    const result = await generateObject(params);
     return result.object;
   } catch (error) {
     // Fallback to structured generation with JSON parsing
@@ -443,4 +440,56 @@ export async function generateAIObject<T>(
 
     return structuredResult.data;
   }
+}
+
+/**
+ * Validates that a provider exists in the configuration
+ */
+export function validateProvider(
+  config: ReturnType<typeof loadConfig>,
+  provider: string,
+): ProviderConfig {
+  const providerConfig = config.providers.find((p) => p.provider === provider);
+  if (!providerConfig) {
+    const availableProviders = config.providers
+      .map((p) => p.provider)
+      .join(", ");
+    throw new Error(
+      `Provider '${provider}' not found in configuration. Available providers: ${availableProviders || "none"}`,
+    );
+  }
+  return providerConfig;
+}
+
+/**
+ * Creates a model with optional provider/model override
+ */
+export function createModelWithOverride(
+  config: ReturnType<typeof loadConfig>,
+  providerOverride?: string,
+  modelOverride?: string,
+): ReturnType<typeof createModel> {
+  let providerConfig: ProviderConfig;
+
+  if (providerOverride) {
+    providerConfig = validateProvider(config, providerOverride);
+    // If model override is provided, use it; otherwise use the provider's preferred model
+    if (modelOverride) {
+      providerConfig = { ...providerConfig, preferredModel: modelOverride };
+    }
+  } else {
+    const defaultProvider = getDefaultProvider(config);
+    if (!defaultProvider) {
+      throw new Error(
+        "No AI provider configured. Run 'aish config' to get started.",
+      );
+    }
+    providerConfig = defaultProvider;
+    // If only model override is provided, use it with the default provider
+    if (modelOverride) {
+      providerConfig = { ...providerConfig, preferredModel: modelOverride };
+    }
+  }
+
+  return createModel(providerConfig);
 }
